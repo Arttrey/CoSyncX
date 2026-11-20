@@ -15,6 +15,8 @@ class ExistingGuiProxyTests(unittest.TestCase):
     def test_rejects_cross_origin_mutations_and_untrusted_hosts(self):
         self.assertTrue(cosync_proxy.allowed_request('127.0.0.1:9876', 'http://127.0.0.1:9876',
                                                       'POST', '/rest/config/folders', port=9876))
+        self.assertTrue(cosync_proxy.allowed_request('127.0.0.1:9876', 'http://127.0.0.1:9876',
+                                                      'POST', '/cosyncx/close', port=9876))
         for host, origin, path in [
             ('evil.example:9876', 'http://127.0.0.1:9876', '/rest/config/folders'),
             ('127.0.0.1:9876', 'https://evil.example', '/rest/config/folders'),

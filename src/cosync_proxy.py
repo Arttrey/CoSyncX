@@ -6,6 +6,7 @@ import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -38,7 +39,8 @@ def allowed_request(host: str, origin: str, method: str, raw_path: str, *, port:
             or any(ord(c) < 32 for c in path) or path in BLOCKED_ACTIONS):
         return False
     if method != 'GET':
-        return origin == f'http://127.0.0.1:{port}' and path.startswith('/rest/')
+        return (origin == f'http://127.0.0.1:{port}' and
+                (path.startswith('/rest/') or (method == 'POST' and path == '/cosyncx/close')))
     return (override_file(path) is not None or path in ('/meta.js', '/themes.json', '/modal.html')
             or path.startswith(('/rest/', '/qr/', '/assets/', '/vendor/', '/syncthing/', '/theme-assets/')))
 
@@ -68,6 +70,10 @@ def make_proxy(client: engine.ExistingEngine, port: int) -> ThreadingHTTPServer:
                                    self.command, self.path, port=self.server.server_port):
                 return self.respond(403, b'Forbidden')
             path = urllib.parse.urlsplit(self.path).path
+            if self.command == 'POST' and path == '/cosyncx/close':
+                self.respond(200, b'CoSyncX interface closed')
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
+                return
             override = override_file(path) if self.command == 'GET' else None
             if override:
                 file = engine.gui_assets_dir() / override
