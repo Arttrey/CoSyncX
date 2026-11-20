@@ -14,8 +14,12 @@ This project is not ready to synchronize real chats, secrets, or workspaces.
 The Linux demonstration starts temporary Syncthing nodes, a test relay, and
 isolated Codex app-server profiles. It checks encrypted snapshots, path
 mapping, mock Git and secrets, and a dependency report; no Cursor window is
-opened. See [QUICKSTART.md](QUICKSTART.md) for the test and its limitations.
-More detailed experiment notes are in [EXPERIMENTS.md](EXPERIMENTS.md).
+opened. See [QUICKSTART.md](docs/QUICKSTART.md) for the test and its limitations.
+More detailed experiment notes are in [EXPERIMENTS.md](docs/EXPERIMENTS.md).
+
+The repository keeps the Python implementation and demonstration in `src/`,
+tests in `tests/`, documentation in `docs/`, and the editor extension in
+`cursor-extension/`.
 
 ## Install the command-line companion
 
@@ -43,7 +47,7 @@ until the relevant workflows have been independently verified.
 - Every device has its own project root, Codex profile, key, and local state.
   Paths from another device are mapped to the configured local project root;
   historical message text is not rewritten.
-- `stignore.example` is a starting point, not a universal ignore policy.
+- `src/stignore.example` is a starting point, not a universal ignore policy.
   Review exclusions per project: dependency manifests and lock files should
   travel, while local environments and caches normally need rebuilding.
 - Secrets need explicit selection, client-side encryption and key management.
@@ -56,9 +60,10 @@ until the relevant workflows have been independently verified.
 
 ## Development
 
-Run the standard local suite with `python -m unittest discover -q`. Tests that
+Install the project for development with `python -m pip install -e .`, then
+run the local suite with `python -m unittest discover -s tests -q`. Tests that
 need Syncthing or Codex are opt-in and use synthetic data; the default suite
-reports them as skipped. See [QUICKSTART.md](QUICKSTART.md) for the Linux
+reports them as skipped. See [QUICKSTART.md](docs/QUICKSTART.md) for the Linux
 integration demonstration. Contributions should preserve the isolation of
 test profiles and must not silently write to a user's live Codex state.
 

@@ -52,7 +52,7 @@ class SyncthingIntegrationTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get('NEXUS_TEST_CODEX') == '1' and shutil.which('codex') and shutil.which('git'),
                          'requires disposable Codex and Git')
     def test_demo_with_local_mss_proxy(self):
-        result = subprocess.run([sys.executable, str(Path(__file__).with_name('demo.py')),
+        result = subprocess.run([sys.executable, str((Path(__file__).resolve().parents[1] / 'src' / 'demo.py')),
                                  '--syncthing', '--loopback-mss'], capture_output=True, text=True, timeout=180)
         self.assertEqual(result.returncode, 0, result.stderr)
         output = json.loads(result.stdout)
@@ -105,7 +105,7 @@ class SyncthingIntegrationTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get('NEXUS_TEST_CODEX') == '1' and shutil.which('codex') and shutil.which('git'),
                          'requires disposable Codex and Git')
     def test_demo_can_poll_only_the_exchange_folder(self):
-        result = subprocess.run([sys.executable, str(Path(__file__).with_name('demo.py')),
+        result = subprocess.run([sys.executable, str((Path(__file__).resolve().parents[1] / 'src' / 'demo.py')),
                                  '--syncthing', '--poll-exchange'], capture_output=True, text=True, timeout=180)
         self.assertEqual(result.returncode, 0, result.stderr)
         output = json.loads(result.stdout)
@@ -124,7 +124,7 @@ class SyncthingIntegrationTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get('NEXUS_TEST_CODEX') == '1' and shutil.which('codex') and shutil.which('git'),
                          'requires disposable Codex and Git')
     def test_one_command_syncthing_demo(self):
-        result = subprocess.run([sys.executable, str(Path(__file__).with_name('demo.py')), '--syncthing'],
+        result = subprocess.run([sys.executable, str((Path(__file__).resolve().parents[1] / 'src' / 'demo.py')), '--syncthing'],
                                 capture_output=True, text=True, timeout=180)
         self.assertEqual(result.returncode, 0, result.stderr)
         output = json.loads(result.stdout)
@@ -202,7 +202,7 @@ class SyncthingIntegrationTests(unittest.TestCase):
             for index, home in enumerate(homes):
                 projects[index].mkdir()
                 shares[index].mkdir()
-                shutil.copyfile(Path(__file__).with_name('stignore.example'), projects[index] / '.stignore')
+                shutil.copyfile((Path(__file__).resolve().parents[1] / 'src' / 'stignore.example'), projects[index] / '.stignore')
                 tree = ET.parse(home / 'config.xml')
                 doc = tree.getroot()
                 options = doc.find('options')
@@ -799,7 +799,7 @@ class SyncthingIntegrationTests(unittest.TestCase):
             for index, home in enumerate(homes):
                 folders[index].mkdir()
                 projects[index].mkdir()
-                shutil.copyfile(Path(__file__).with_name('stignore.example'), projects[index] / '.stignore')
+                shutil.copyfile((Path(__file__).resolve().parents[1] / 'src' / 'stignore.example'), projects[index] / '.stignore')
                 if index == 0:
                     (projects[index] / 'project.txt').write_text('linux source\n')
                     samples = {

@@ -11,14 +11,14 @@ Syncthing 2.1.7. Это вероятное объяснение задержек
 характеризует связь между настоящими устройствами или VPS. Системные сетевые
 настройки не менялись.
 
-Для теста в таком окружении можно запустить `python3 demo.py --syncthing
+Для теста в таком окружении можно запустить `python3 src/demo.py --syncthing
 --loopback-mss`. Опция создаёт только временный TCP-посредник на `127.0.0.1` с
 MSS 1200, передаёт через него соединения между тестовыми узлами и закрывает его
 после завершения. Она не настраивает реальный Syncthing, Nexus или VPS и не
 подтверждает надёжность сети между устройствами.
 
 Быстрая демонстрация на Linux с установленными Git, Codex CLI и зависимостью из
-`requirements.txt`: `python3 demo.py`. Она создаёт синтетический проект и чат в
+`requirements.txt`: `python3 src/demo.py`. Она создаёт синтетический проект и чат в
 новом каталоге `/tmp/nexus-sync-demo-*`, затем показывает восстановление Git,
 индексацию мокового чата и отчёт о зависимостях. Результат содержит путь к
 папке и отчёту. Файлы остаются там для изучения; `demo.key` — только тестовый
@@ -29,7 +29,7 @@ MSS 1200, передаёт через него соединения между �
 передачи. Передача через промежуточный узел в этой команде имитируется копированием:
 Syncthing, VPS и Cursor не запускаются и не настраиваются. Видимость в Cursor
 не подтверждается. Для настоящих проектов и чатов демонстрация не предназначена.
-Для проверки с настоящим Syncthing используйте `python3 demo.py --syncthing`:
+Для проверки с настоящим Syncthing используйте `python3 src/demo.py --syncthing`:
 команда запускает четыре временных узла на `127.0.0.1`: источник Send Only,
 промежуточный узел и два последовательно подключаемых моковых получателя.
 
@@ -64,7 +64,7 @@ Syncthing, VPS и Cursor не запускаются и не настраива�
 90 секунд: получатель не получил индекс при активном соединении. Это не
 доказывает причину сбоя и не подтверждает безопасность смены версии или работу
 на других ОС; системный Syncthing не изменялся.
-Этот вариант можно воспроизвести командой `python3 demo.py --syncthing
+Этот вариант можно воспроизвести командой `python3 src/demo.py --syncthing
 --poll-exchange`: она меняет только конфигурации временных узлов. Без флага
 наблюдатель остаётся включённым в обеих папках; режим не доказывает, что сбой
 устранён, и не предназначен для рабочих данных.
@@ -104,7 +104,7 @@ Git и секретные файлы по именам без ручного п�
 Обновление настоящих проектов,
 секретов и разрешение конфликтов автоматически не выполняются.
 Демо также выводит `status_configs` — пути к конфигурациям обоих моковых
-получателей. С ними можно проверить `python3 nexus_sync.py summary --config
+получателей. С ними можно проверить `python3 src/nexus_sync.py summary --config
 "<путь из status_configs>"` или вручную указать одну из конфигураций в настройке
 `nexusSync.config` тестового расширения. Пока наблюдатель не запущен, статус
 честно показывает, что его работа не подтверждена. Демо не меняет настройки
@@ -148,39 +148,39 @@ requirements.txt`. В командах ниже используйте этот 
 на Python с установленным `cryptography`.
 
 ```sh
-python3 nexus_sync.py projects --nexus "/путь/к/Nexus" --save "/локальный/путь/baseline.json"
-python3 nexus_sync.py projects --nexus "/путь/к/Nexus" --previous "/локальный/путь/baseline.json"
-python3 nexus_sync.py projects-record --nexus "/путь/к/Nexus" --shared "/путь/к/папке-обмена" --state-dir "/локальная/папка-состояния" --machine linux --key-file "/локальный/приватный/путь/nexus.key"
-python3 nexus_sync.py projects-log --shared "/путь/к/папке-обмена" --key-file "/локальный/приватный/путь/nexus.key"
-python3 nexus_sync.py keygen "/локальный/приватный/путь/nexus.key"
-python3 nexus_sync.py snapshot --codex-home "/путь/к/.codex" --shared "/путь/к/папке-обмена" --machine linux --key-file "/локальный/приватный/путь/nexus.key"
-python3 nexus_sync.py verify "/путь/к/папке-обмена/nexus-sync/snapshots/linux/идентификатор" --key-file "/локальный/приватный/путь/nexus.key"
-python3 nexus_sync.py extract "/путь/к/снимку" --destination "/новая/папка-карантин" --key-file "/локальный/приватный/путь/nexus.key"
-python3 nexus_sync.py plan-chats --incoming "/новая/папка-карантин" --codex-home "/путь/к/.codex" --source-root "/старый/Nexus" --target-root "/новый/Nexus"
-python3 nexus_sync.py plan-prepared --config "/локальная/папка/nexus-sync.json"
-python3 nexus_sync.py preview-merge --config "/локальная/папка/nexus-sync.json" --source linux --snapshot "<ID снимка>" --destination "/новая/тестовая/папка"
-python3 nexus_sync.py prepare-chats --incoming "/новая/папка-карантин" --destination "/новая/тестовая/папка" --source-root "/старый/Nexus" --target-root "/новый/Nexus"
-python3 nexus_sync.py index-preview --incoming "/тестовая/папка-карантин" --destination "/новый/тестовый-профиль" --source-root "/старый/Nexus" --config "/локальная/папка/nexus-sync.json" --codex-executable "/проверенный/путь/codex"
-python3 nexus_sync.py reindex-mock-preview --profile "/временная/папка/тестовый-профиль" --config "/локальная/папка/nexus-sync.json" --codex-executable "/проверенный/путь/codex"
-python3 nexus_sync.py index-snapshot-preview --source linux --snapshot "<ID снимка>" --destination "/новый/тестовый-профиль" --config "/локальная/папка/nexus-sync.json" --codex-executable "/проверенный/путь/codex"
-python3 nexus_sync.py index-multi-preview --source-snapshot linux "<ID Linux>" --source-snapshot windows "<ID Windows>" --destination "/новый/общий-тестовый-профиль" --config "/локальная/папка/nexus-sync.json" --codex-executable "/проверенный/путь/codex"
-python3 nexus_sync.py acknowledge "/путь/к/снимку" --shared "/путь/к/папке-обмена" --machine mac --key-file "/локальный/приватный/путь/nexus.key"
-python3 nexus_sync.py status --shared "/путь/к/папке-обмена" --machine linux
-python3 nexus_sync.py summary --config "/локальная/папка/nexus-sync.json"
-python3 nexus_sync.py auto-previews --config "/локальная/папка/nexus-sync.json"
-python3 nexus_sync.py watch --codex-home "/путь/к/.codex" --shared "/путь/к/папке-обмена" --machine linux --interval 60 --key-file "/локальный/приватный/путь/nexus.key"
-python3 nexus_sync.py watch-receive --shared "/путь/к/папке-обмена" --machine mac --interval 60 --key-file "/локальный/приватный/путь/nexus.key"
-python3 nexus_sync.py secrets-pack --shared "/путь/к/папке-обмена" --machine linux --key-file "/локальный/приватный/путь/nexus.key" "/путь/к/секрету/.env"
-python3 nexus_sync.py secrets-extract "/путь/к/пакету.nxs" --shared "/путь/к/папке-обмена" --destination "/новая/локальная/папка" --key-file "/локальный/приватный/путь/nexus.key"
-python3 nexus_sync.py packages --config "/локальная/папка/nexus-sync.json"
-python3 nexus_sync.py discover-secrets --config "/локальная/папка/nexus-sync.json"
-python3 nexus_sync.py plan-secrets --config "/локальная/папка/nexus-sync.json" --source linux --package "<ID пакета>"
-python3 nexus_sync.py git-pack --repo "/путь/к/Nexus/проект" --shared "/путь/к/папке-обмена" --machine linux --key-file "/локальный/приватный/путь/nexus.key"
-python3 nexus_sync.py git-preview "/путь/к/тестовому-Git-пакету.nxs" --config "/локальная/папка/nexus-sync.json" --destination "/новая/тестовая/папка"
-python3 nexus_sync.py discover-git --nexus "/путь/к/Nexus" --shared "/путь/к/папке-обмена"
-python3 nexus_sync.py init-config --output "/локальная/папка/nexus-sync.json" --nexus "/путь/к/Nexus" --codex-home "/путь/к/.codex" --shared "/путь/к/папке-обмена" --state-dir "/локальная/папка-состояния" --machine linux --key-file "/локальный/приватный/путь/nexus.key"
-python3 nexus_sync.py run --config "/локальная/папка/nexus-sync.json"
-python3 nexus_sync.py generate-startup --config "/локальная/папка/nexus-sync.json" --destination "/новая/локальная/папка-шаблона"
+python3 src/nexus_sync.py projects --nexus "/путь/к/Nexus" --save "/локальный/путь/baseline.json"
+python3 src/nexus_sync.py projects --nexus "/путь/к/Nexus" --previous "/локальный/путь/baseline.json"
+python3 src/nexus_sync.py projects-record --nexus "/путь/к/Nexus" --shared "/путь/к/папке-обмена" --state-dir "/локальная/папка-состояния" --machine linux --key-file "/локальный/приватный/путь/nexus.key"
+python3 src/nexus_sync.py projects-log --shared "/путь/к/папке-обмена" --key-file "/локальный/приватный/путь/nexus.key"
+python3 src/nexus_sync.py keygen "/локальный/приватный/путь/nexus.key"
+python3 src/nexus_sync.py snapshot --codex-home "/путь/к/.codex" --shared "/путь/к/папке-обмена" --machine linux --key-file "/локальный/приватный/путь/nexus.key"
+python3 src/nexus_sync.py verify "/путь/к/папке-обмена/nexus-sync/snapshots/linux/идентификатор" --key-file "/локальный/приватный/путь/nexus.key"
+python3 src/nexus_sync.py extract "/путь/к/снимку" --destination "/новая/папка-карантин" --key-file "/локальный/приватный/путь/nexus.key"
+python3 src/nexus_sync.py plan-chats --incoming "/новая/папка-карантин" --codex-home "/путь/к/.codex" --source-root "/старый/Nexus" --target-root "/новый/Nexus"
+python3 src/nexus_sync.py plan-prepared --config "/локальная/папка/nexus-sync.json"
+python3 src/nexus_sync.py preview-merge --config "/локальная/папка/nexus-sync.json" --source linux --snapshot "<ID снимка>" --destination "/новая/тестовая/папка"
+python3 src/nexus_sync.py prepare-chats --incoming "/новая/папка-карантин" --destination "/новая/тестовая/папка" --source-root "/старый/Nexus" --target-root "/новый/Nexus"
+python3 src/nexus_sync.py index-preview --incoming "/тестовая/папка-карантин" --destination "/новый/тестовый-профиль" --source-root "/старый/Nexus" --config "/локальная/папка/nexus-sync.json" --codex-executable "/проверенный/путь/codex"
+python3 src/nexus_sync.py reindex-mock-preview --profile "/временная/папка/тестовый-профиль" --config "/локальная/папка/nexus-sync.json" --codex-executable "/проверенный/путь/codex"
+python3 src/nexus_sync.py index-snapshot-preview --source linux --snapshot "<ID снимка>" --destination "/новый/тестовый-профиль" --config "/локальная/папка/nexus-sync.json" --codex-executable "/проверенный/путь/codex"
+python3 src/nexus_sync.py index-multi-preview --source-snapshot linux "<ID Linux>" --source-snapshot windows "<ID Windows>" --destination "/новый/общий-тестовый-профиль" --config "/локальная/папка/nexus-sync.json" --codex-executable "/проверенный/путь/codex"
+python3 src/nexus_sync.py acknowledge "/путь/к/снимку" --shared "/путь/к/папке-обмена" --machine mac --key-file "/локальный/приватный/путь/nexus.key"
+python3 src/nexus_sync.py status --shared "/путь/к/папке-обмена" --machine linux
+python3 src/nexus_sync.py summary --config "/локальная/папка/nexus-sync.json"
+python3 src/nexus_sync.py auto-previews --config "/локальная/папка/nexus-sync.json"
+python3 src/nexus_sync.py watch --codex-home "/путь/к/.codex" --shared "/путь/к/папке-обмена" --machine linux --interval 60 --key-file "/локальный/приватный/путь/nexus.key"
+python3 src/nexus_sync.py watch-receive --shared "/путь/к/папке-обмена" --machine mac --interval 60 --key-file "/локальный/приватный/путь/nexus.key"
+python3 src/nexus_sync.py secrets-pack --shared "/путь/к/папке-обмена" --machine linux --key-file "/локальный/приватный/путь/nexus.key" "/путь/к/секрету/.env"
+python3 src/nexus_sync.py secrets-extract "/путь/к/пакету.nxs" --shared "/путь/к/папке-обмена" --destination "/новая/локальная/папка" --key-file "/локальный/приватный/путь/nexus.key"
+python3 src/nexus_sync.py packages --config "/локальная/папка/nexus-sync.json"
+python3 src/nexus_sync.py discover-secrets --config "/локальная/папка/nexus-sync.json"
+python3 src/nexus_sync.py plan-secrets --config "/локальная/папка/nexus-sync.json" --source linux --package "<ID пакета>"
+python3 src/nexus_sync.py git-pack --repo "/путь/к/Nexus/проект" --shared "/путь/к/папке-обмена" --machine linux --key-file "/локальный/приватный/путь/nexus.key"
+python3 src/nexus_sync.py git-preview "/путь/к/тестовому-Git-пакету.nxs" --config "/локальная/папка/nexus-sync.json" --destination "/новая/тестовая/папка"
+python3 src/nexus_sync.py discover-git --nexus "/путь/к/Nexus" --shared "/путь/к/папке-обмена"
+python3 src/nexus_sync.py init-config --output "/локальная/папка/nexus-sync.json" --nexus "/путь/к/Nexus" --codex-home "/путь/к/.codex" --shared "/путь/к/папке-обмена" --state-dir "/локальная/папка-состояния" --machine linux --key-file "/локальный/приватный/путь/nexus.key"
+python3 src/nexus_sync.py run --config "/локальная/папка/nexus-sync.json"
+python3 src/nexus_sync.py generate-startup --config "/локальная/папка/nexus-sync.json" --destination "/новая/локальная/папка-шаблона"
 ```
 
 На Windows используйте `py -3` и свои пути. Папка обмена должна существовать,
@@ -507,12 +507,12 @@ API, которое установленный app-server для неё откл
 эксперимента каждый из двух JSONL ограничен размером 16 МиБ.
 
 ```sh
-python3 mock_chat_sync.py init --profile "/tmp/тест/профиль" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ"
-python3 mock_chat_sync.py apply --profile "/tmp/тест/профиль" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --snapshot "/tmp/тест/обмен/nexus-sync/snapshots/linux/ID" --thread-id "ID чата" --source-root "/старый/Nexus" --target-root "/tmp/тест/Nexus"
-python3 mock_chat_sync.py reindex --profile "/tmp/тест/профиль" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --target-root "/tmp/тест/Nexus" --thread-id "ID чата" --codex-executable "/проверенный/путь/codex"
-python3 mock_chat_sync.py sync-latest --profile "/tmp/тест/профиль" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --source linux --thread-id "ID чата" --source-root "/старый/Nexus" --target-root "/tmp/тест/Nexus" --codex-executable "/проверенный/путь/codex"
-python3 mock_chat_sync.py sync-all --profile "/tmp/тест/профиль" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --source linux --source-root "/старый/Nexus" --target-root "/tmp/тест/Nexus" --codex-executable "/проверенный/путь/codex"
-python3 mock_chat_sync.py watch-all --profile "/tmp/тест/профиль" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --source linux --source-root "/старый/Nexus" --target-root "/tmp/тест/Nexus" --codex-executable "/проверенный/путь/codex" --interval 5
+python3 src/mock_chat_sync.py init --profile "/tmp/тест/профиль" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ"
+python3 src/mock_chat_sync.py apply --profile "/tmp/тест/профиль" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --snapshot "/tmp/тест/обмен/nexus-sync/snapshots/linux/ID" --thread-id "ID чата" --source-root "/старый/Nexus" --target-root "/tmp/тест/Nexus"
+python3 src/mock_chat_sync.py reindex --profile "/tmp/тест/профиль" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --target-root "/tmp/тест/Nexus" --thread-id "ID чата" --codex-executable "/проверенный/путь/codex"
+python3 src/mock_chat_sync.py sync-latest --profile "/tmp/тест/профиль" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --source linux --thread-id "ID чата" --source-root "/старый/Nexus" --target-root "/tmp/тест/Nexus" --codex-executable "/проверенный/путь/codex"
+python3 src/mock_chat_sync.py sync-all --profile "/tmp/тест/профиль" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --source linux --source-root "/старый/Nexus" --target-root "/tmp/тест/Nexus" --codex-executable "/проверенный/путь/codex"
+python3 src/mock_chat_sync.py watch-all --profile "/tmp/тест/профиль" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --source linux --source-root "/старый/Nexus" --target-root "/tmp/тест/Nexus" --codex-executable "/проверенный/путь/codex" --interval 5
 ```
 
 Для автоматического эксперимента `mock_chat_preview.py` создаёт **новый**
@@ -520,8 +520,8 @@ python3 mock_chat_sync.py watch-all --profile "/tmp/тест/профиль" --s
 через headless Codex. Уже подготовленные профили повторно не изменяются.
 
 ```sh
-python3 mock_chat_preview.py init --root "/tmp/тест/подготовленные-чаты" --shared "/tmp/тест/обмен" --target-root "/tmp/тест/Nexus" --source linux --source-root "/старый/Nexus" --key-file "/tmp/тест/ключ"
-python3 mock_chat_preview.py watch --root "/tmp/тест/подготовленные-чаты" --key-file "/tmp/тест/ключ" --codex-executable "/проверенный/путь/codex"
+python3 src/mock_chat_preview.py init --root "/tmp/тест/подготовленные-чаты" --shared "/tmp/тест/обмен" --target-root "/tmp/тест/Nexus" --source linux --source-root "/старый/Nexus" --key-file "/tmp/тест/ключ"
+python3 src/mock_chat_preview.py watch --root "/tmp/тест/подготовленные-чаты" --key-file "/tmp/тест/ключ" --codex-executable "/проверенный/путь/codex"
 ```
 
 `PREPARED` означает подготовку отдельного мокового профиля, а не появление
@@ -708,7 +708,7 @@ python3 mock_chat_preview.py watch --root "/tmp/тест/подготовлен�
 Состояние изменения определяется по имени, размеру и времени файлов, не как
 гарантия обнаружения любой возможной модификации.
 
-`stignore.example` — черновик исключений только для тестовой папки. Он не
+`src/stignore.example` — черновик исключений только для тестовой папки. Он не
 применён к реальному Nexus: правила Syncthing локальны для каждого устройства,
 а ошибочное исключение может скрыть нужные файлы. Он не является полным
 детектором секретов: до включения рабочей синхронизации нужно отдельно
@@ -735,7 +735,7 @@ python3 mock_chat_preview.py watch --root "/tmp/тест/подготовлен�
 копию правил в `/tmp` и выполнить, например:
 
 ```sh
-python3 mock_ignore_probe.py --rules /tmp/mock-stignore --path Bot/venv/lib.py --path Bot/src/main.py
+python3 src/mock_ignore_probe.py --rules /tmp/mock-stignore --path Bot/venv/lib.py --path Bot/src/main.py
 ```
 
 Команда создаёт временные файлы и отдельный локальный узел Syncthing; она не
@@ -902,10 +902,10 @@ Git при восстановлении не запускаются. Стары�
 копии с индексом; неиндексированные изменения могут оставаться в проекте.
 
 ```sh
-python3 mock_git_sync.py init --root "/tmp/тест/мок-Nexus" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ"
+python3 src/mock_git_sync.py init --root "/tmp/тест/мок-Nexus" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ"
 # Создайте или скопируйте моковый проект в /tmp/тест/мок-Nexus/Bot.
-python3 mock_git_sync.py apply --root "/tmp/тест/мок-Nexus" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --package "/tmp/тест/обмен/nexus-sync/secrets/linux/ID.nxs" --project Bot
-python3 mock_git_sync.py fetch --root "/tmp/тест/мок-Nexus" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --package "/tmp/тест/обмен/nexus-sync/secrets/linux/НОВЫЙ-ID.nxs" --project Bot --source linux
+python3 src/mock_git_sync.py apply --root "/tmp/тест/мок-Nexus" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --package "/tmp/тест/обмен/nexus-sync/secrets/linux/ID.nxs" --project Bot
+python3 src/mock_git_sync.py fetch --root "/tmp/тест/мок-Nexus" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --package "/tmp/тест/обмен/nexus-sync/secrets/linux/НОВЫЙ-ID.nxs" --project Bot --source linux
 ```
 
 `fetch` вручную добавляет ссылки веток и тегов конкретного пакета под
@@ -919,7 +919,7 @@ Git. Порядок и объединение пакетов автоматич�
 зашифрованного пакета с относительными путями:
 
 ```sh
-python3 mock_secret_sync.py --root "/tmp/тест/мок-Nexus" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --package "/tmp/тест/обмен/nexus-sync/secrets/linux/ID.nxs" --path Bot/.env
+python3 src/mock_secret_sync.py --root "/tmp/тест/мок-Nexus" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --package "/tmp/тест/обмен/nexus-sync/secrets/linux/ID.nxs" --path Bot/.env
 ```
 
 Команда работает только на Linux, требует существующий каталог проекта, не
@@ -936,7 +936,7 @@ python3 mock_secret_sync.py --root "/tmp/тест/мок-Nexus" --shared "/tmp/�
 новых версий этим не поддерживаются.
 
 ```sh
-python3 mock_auto_receiver.py --root "/tmp/тест/мок-Nexus" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --git-package "/tmp/тест/обмен/nexus-sync/secrets/linux/GIT-ID.nxs" --secret-package "/tmp/тест/обмен/nexus-sync/secrets/linux/SECRET-ID.nxs" --project Bot --secret-path Bot/.env
+python3 src/mock_auto_receiver.py --root "/tmp/тест/мок-Nexus" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --git-package "/tmp/тест/обмен/nexus-sync/secrets/linux/GIT-ID.nxs" --secret-package "/tmp/тест/обмен/nexus-sync/secrets/linux/SECRET-ID.nxs" --project Bot --secret-path Bot/.env
 ```
 
 Экспериментальный `mock_publications.py` создаёт проверяемую цепочку версий
@@ -951,7 +951,7 @@ python3 mock_auto_receiver.py --root "/tmp/тест/мок-Nexus" --shared "/tmp
 попытку. Настроить её можно только для отдельного мокового обмена и состояния:
 
 ```sh
-python3 mock_publications.py watch-marker --shared "/tmp/тест/обмен" --state "/tmp/тест/состояние" --key-file "/tmp/тест/ключ" --source linux --kind secret --name Bot/.env
+python3 src/mock_publications.py watch-marker --shared "/tmp/тест/обмен" --state "/tmp/тест/состояние" --key-file "/tmp/тест/ключ" --source linux --kind secret --name Bot/.env
 ```
 
 Для Git используйте `--kind git --name Bot`. Процесс останавливается через
@@ -978,7 +978,7 @@ Ctrl+C; при старте он публикует текущую подтве�
 Вместо отдельных наблюдателей файлов можно запустить один моковый процесс:
 
 ```sh
-python3 mock_publications.py watch-all-secrets --shared "/tmp/тест/обмен" --state "/tmp/тест/состояние" --key-file "/tmp/тест/ключ" --source linux
+python3 src/mock_publications.py watch-all-secrets --shared "/tmp/тест/обмен" --state "/tmp/тест/состояние" --key-file "/tmp/тест/ключ" --source linux
 ```
 
 Он читает подтверждённую отметку отправителя, локально расшифровывает тестовый
@@ -993,7 +993,7 @@ Nexus, включая файлы в его корне. Если файл исч�
 Приёмник также умеет выбирать локально доступные публикации без ID пакетов:
 
 ```sh
-python3 mock_auto_receiver.py --root "/tmp/тест/мок-Nexus" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --source linux --project Bot --secret-path Bot/.env
+python3 src/mock_auto_receiver.py --root "/tmp/тест/мок-Nexus" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --source linux --project Bot --secret-path Bot/.env
 ```
 
 В режиме `--source` параметр `--secret-path` можно повторить для нескольких
@@ -1008,7 +1008,7 @@ python3 mock_auto_receiver.py --root "/tmp/тест/мок-Nexus" --shared "/tmp
 Для мокового проекта без Git вместо `--project Bot` укажите `--secrets-only`:
 
 ```sh
-python3 mock_auto_receiver.py --root "/tmp/тест/мок-Nexus" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --source linux --secrets-only --secret-path Plain/.env --secret-path Plain/.npmrc --watch
+python3 src/mock_auto_receiver.py --root "/tmp/тест/мок-Nexus" --shared "/tmp/тест/обмен" --key-file "/tmp/тест/ключ" --source linux --secrets-only --secret-path Plain/.env --secret-path Plain/.npmrc --watch
 ```
 
 На каждый путь нужна подписанная цепочка публикаций, а каталог `Plain` должен

@@ -1233,7 +1233,7 @@ class CodexContractTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == 'linux', 'mock demo requires Linux')
     def test_one_command_demo_uses_synthetic_data(self):
-        result = subprocess.run([sys.executable, str(Path(__file__).with_name('demo.py')),
+        result = subprocess.run([sys.executable, str((Path(__file__).resolve().parents[1] / 'src' / 'demo.py')),
                                  '--codex-executable', CODEX_EXECUTABLE], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(result.stdout)

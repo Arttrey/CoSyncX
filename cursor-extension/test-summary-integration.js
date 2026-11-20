@@ -16,7 +16,7 @@ assert(relative.split(path.sep)[0].startsWith('nexus-sync-demo-'));
 let status;
 const settings = {
     python: process.env.NEXUS_PYTHON || 'python3',
-    script: path.resolve(__dirname, '..', 'nexus_sync.py'),
+    script: path.resolve(__dirname, '..', 'src', 'nexus_sync.py'),
     config,
 };
 const vscode = {

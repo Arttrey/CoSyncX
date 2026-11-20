@@ -40,7 +40,7 @@ class MockIgnoreProbeTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get('NEXUS_TEST_SYNCTHING') == '1' and shutil.which('syncthing'),
                          'requires opt-in local Syncthing')
     def test_sample_ignores_uppercase_secret_names(self):
-        self.rules.write_bytes(Path(__file__).with_name('stignore.example').read_bytes())
+        self.rules.write_bytes((Path(__file__).resolve().parents[1] / 'src' / 'stignore.example').read_bytes())
         result = probe.probe(self.rules, ['Bot/.ENV', 'Bot/.NPMRC', 'Bot/server.PEM', 'Bot/source.py'], timeout=25)
         self.assertEqual(result['state'], 'CHECKED', result)
         self.assertEqual([item['state'] for item in result['files']],

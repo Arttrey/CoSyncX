@@ -17,11 +17,11 @@ python3 -m venv /tmp/nexus-sync-venv
 Запуск с этим окружением:
 
 ```bash
-/tmp/nexus-sync-venv/bin/python demo.py --syncthing --loopback-mss
+/tmp/nexus-sync-venv/bin/python src/demo.py --syncthing --loopback-mss
 ```
 
 Если `cryptography` уже доступен системному Python, вместо последней команды
-можно выполнить `python3 demo.py --syncthing --loopback-mss` из этого каталога.
+можно выполнить `python3 src/demo.py --syncthing --loopback-mss` из корня проекта.
 Опция `--loopback-mss` нужна для обхода обнаруженной проблемы локального TCP в
 этом тестовом окружении; она не меняет настройки сети компьютера.
 
@@ -66,7 +66,7 @@ python3 -m venv /tmp/nexus-sync-venv
 пути к тестовым конфигурациям для команды статуса:
 
 ```bash
-/tmp/nexus-sync-venv/bin/python nexus_sync.py summary --config '<путь из status_configs>'
+/tmp/nexus-sync-venv/bin/python src/nexus_sync.py summary --config '<путь из status_configs>'
 ```
 
 Созданная папка в `/tmp` остаётся для просмотра. Файл `demo.key` внутри неё —

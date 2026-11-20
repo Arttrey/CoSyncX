@@ -16,4 +16,5 @@ cosyncx = "nexus_sync:main"
 nexus-sync = "nexus_sync:main"
 
 [tool.setuptools]
+package-dir = {"" = "src"}
 py-modules = ["nexus_sync", "mock_auto_receiver", "mock_chat_preview", "mock_chat_sync", "mock_git_sync", "mock_ignore_probe", "mock_loopback_proxy", "mock_publications", "mock_secret_sync", "mock_syncthing_status"]
