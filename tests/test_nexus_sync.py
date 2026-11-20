@@ -206,6 +206,21 @@ class NexusSyncTests(unittest.TestCase):
         self.assertEqual(item('unknown')['incoming_format_warning'], 'UNKNOWN_FORMAT')
         self.assertEqual(before, {p.name: p.read_bytes() for p in sessions.iterdir()})
 
+    def test_paginated_relation_is_read_only_and_does_not_enable_import(self):
+        incoming = self.root / 'incoming'
+        sessions = incoming / 'sessions'
+        sessions.mkdir(parents=True)
+        metadata = {'type': 'session_meta', 'payload': {'id': 'test', 'history_mode': 'paginated', 'cwd': '/old/Nexus'}}
+        first = json.dumps(metadata) + '\n'
+        self.chat.write_text(first)
+        remote = sessions / 'rollout-test.jsonl'
+        remote.write_text(first + json.dumps({'type': 'event_msg', 'payload': {'message': 'new'}}) + '\n')
+        before = self.chat.read_bytes()
+        row = ns.plan_chats(incoming, self.codex, '/old/Nexus', '/old/Nexus')[0]
+        self.assertEqual(row['relation'], 'INCOMING_UNSUPPORTED')
+        self.assertEqual(row['paginated_relation_unverified'], 'INCOMING_EXTENDS_AFTER_PATH_MAPPING')
+        self.assertEqual(self.chat.read_bytes(), before)
+
     def test_changed_source_is_refused(self):
         real_digest = ns._digest
         def change_before_digest(path):

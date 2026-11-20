@@ -892,12 +892,30 @@ def plan_chats(incoming: Path, target: Path, source_root: str | None = None, tar
             relation = _path_adjusted_relation(versions[0]['path'], local[0]['path'], source_root, target_root)
         else:
             relation = 'DIVERGED'
+        # A read-only comparison is useful for newer histories, but does not
+        # certify that their index or inherited pages can be restored safely.
+        paginated_relation = None
+        if len(versions) == 1 and len(local) <= 1 and versions[0]['unsupported'] == 'PAGINATED':
+            try:
+                if not local:
+                    paginated_relation = 'NO_LOCAL_FILE'
+                elif local[0]['unsupported'] != 'PAGINATED' or local[0]['folder'] != versions[0]['folder']:
+                    paginated_relation = 'INCOMPATIBLE'
+                elif _digest(local[0]['path']) == _digest(versions[0]['path']):
+                    paginated_relation = 'IDENTICAL'
+                elif source_root and target_root:
+                    paginated_relation = _path_adjusted_relation(versions[0]['path'], local[0]['path'], source_root, target_root)
+                else:
+                    paginated_relation = 'DIFFERENT_UNCLASSIFIED'
+            except (OSError, SyncError):
+                paginated_relation = 'UNREADABLE'
         cwd_status = 'NOT_CHECKED'
         if source_root and target_root:
             cwd_status = _history_cwd_status(versions[0]['path'], source_root, target_root)
         plan.append({'chat_hash': hashlib.sha256(identifier.encode('utf-8')).hexdigest(), 'relation': relation, 'cwd': cwd_status,
                      'incoming_format_warning': versions[0]['unsupported'] if len(versions) == 1 else None,
-                     'history_base': base_status, 'parent_thread': parent_status, 'thread_kind': thread_kind})
+                     'history_base': base_status, 'parent_thread': parent_status, 'thread_kind': thread_kind,
+                     'paginated_relation_unverified': paginated_relation})
     return plan
 
 
