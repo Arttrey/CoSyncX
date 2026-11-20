@@ -175,11 +175,20 @@ def _walk(root: Path, *, reject_symlinks: bool = False, observe_directory=None):
         raise SyncError(f'Ошибка чтения каталога: {error}')
     for current, directories, files in os.walk(root, followlinks=False, onerror=failed):
         directory = Path(current)
-        if reject_symlinks and any((directory / name).is_symlink() for name in directories + files):
-            raise SyncError('Символьная ссылка в каталоге чатов: сравнение остановлено')
         if observe_directory is not None:
             observe_directory(directory, directories, files)
-        directories[:] = sorted(name for name in directories if name not in EXCLUDED and not (directory / name).is_symlink())
+        kept = []
+        for name in directories:
+            path = directory / name
+            try:
+                linked = path.is_symlink()
+            except OSError as exc:
+                raise SyncError('Не удалось проверить каталог чатов') from exc
+            if linked and reject_symlinks:
+                raise SyncError('Символьная ссылка в каталоге чатов: сравнение остановлено')
+            if name not in EXCLUDED and not linked:
+                kept.append(name)
+        directories[:] = sorted(kept)
         for name in sorted(files):
             path = directory / name
             try:
@@ -189,6 +198,8 @@ def _walk(root: Path, *, reject_symlinks: bool = False, observe_directory=None):
                 # they can report it instead of silently claiming completeness.
                 yield path
                 continue
+            if statmod.S_ISLNK(mode) and reject_symlinks:
+                raise SyncError('Символьная ссылка в каталоге чатов: сравнение остановлено')
             if statmod.S_ISREG(mode):
                 yield path
 
