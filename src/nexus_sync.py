@@ -658,7 +658,9 @@ def _chat_catalog(root: Path, *, include_unsupported: bool = False) -> dict[str,
                     raise SyncError('Слишком большая строка метаданных')
                 record = json.loads(first)
                 payload = record.get('payload') if isinstance(record, dict) and record.get('type') == 'session_meta' else None
-                identifier = (payload.get('session_id') or payload.get('id')) if isinstance(payload, dict) else None
+                # Newer Codex histories use id for the thread and session_id
+                # for the shared session; several threads can share the latter.
+                identifier = (payload.get('id') or payload.get('session_id')) if isinstance(payload, dict) else None
                 if not isinstance(identifier, str) or not identifier:
                     raise SyncError('Чат без идентификатора; сравнение остановлено')
                 mode = payload.get('history_mode')
@@ -833,7 +835,9 @@ def plan_chats(incoming: Path, target: Path, source_root: str | None = None, tar
     target = target.resolve(strict=True)
     if incoming == target or incoming in target.parents or target in incoming.parents:
         raise SyncError('Входящая копия и локальный Codex должны быть раздельными')
-    sources = _chat_catalog(incoming)
+    # Inspect unsupported histories without declaring them safe to import. One
+    # paginated chat must not prevent planning all other independent chats.
+    sources = _chat_catalog(incoming, include_unsupported=True)
     if not sources:
         raise SyncError('Во входящей копии не найдено чатов')
     targets = _chat_catalog(target, include_unsupported=True)
@@ -842,6 +846,8 @@ def plan_chats(incoming: Path, target: Path, source_root: str | None = None, tar
         local = targets.get(identifier, [])
         if len(versions) != 1 or len(local) > 1:
             relation = 'AMBIGUOUS'
+        elif versions[0]['unsupported']:
+            relation = 'INCOMING_UNSUPPORTED'
         elif not local:
             relation = 'NO_LOCAL_FILE'
         elif local[0]['unsupported']:
@@ -861,7 +867,8 @@ def plan_chats(incoming: Path, target: Path, source_root: str | None = None, tar
         cwd_status = 'NOT_CHECKED'
         if source_root and target_root:
             cwd_status = _history_cwd_status(versions[0]['path'], source_root, target_root)
-        plan.append({'chat_hash': hashlib.sha256(identifier.encode('utf-8')).hexdigest(), 'relation': relation, 'cwd': cwd_status})
+        plan.append({'chat_hash': hashlib.sha256(identifier.encode('utf-8')).hexdigest(), 'relation': relation, 'cwd': cwd_status,
+                     'incoming_format_warning': versions[0]['unsupported'] if len(versions) == 1 else None})
     return plan
 
 

@@ -188,6 +188,24 @@ class NexusSyncTests(unittest.TestCase):
         with self.assertRaisesRegex(ns.SyncError, 'Неизвестный формат'):
             ns._chat_catalog(self.codex)
 
+    def test_plan_reports_unsupported_incoming_without_blocking_other_chats(self):
+        incoming = self.root / 'incoming'
+        sessions = incoming / 'sessions'
+        sessions.mkdir(parents=True)
+        for identifier, mode in [('ordinary', 'legacy'), ('paged', 'paginated'), ('unknown', 'future')]:
+            (sessions / f'rollout-{identifier}.jsonl').write_text(json.dumps({
+                'type': 'session_meta', 'payload': {'id': identifier, 'history_mode': mode}
+            }) + '\n')
+        before = {p.name: p.read_bytes() for p in sessions.iterdir()}
+        plan = {item['chat_hash']: item for item in ns.plan_chats(incoming, self.codex)}
+        def item(name):
+            return plan[hashlib.sha256(name.encode()).hexdigest()]
+        self.assertEqual(item('ordinary')['relation'], 'NO_LOCAL_FILE')
+        self.assertEqual(item('paged')['relation'], 'INCOMING_UNSUPPORTED')
+        self.assertEqual(item('paged')['incoming_format_warning'], 'PAGINATED')
+        self.assertEqual(item('unknown')['incoming_format_warning'], 'UNKNOWN_FORMAT')
+        self.assertEqual(before, {p.name: p.read_bytes() for p in sessions.iterdir()})
+
     def test_changed_source_is_refused(self):
         real_digest = ns._digest
         def change_before_digest(path):
@@ -1924,6 +1942,21 @@ class NexusSyncTests(unittest.TestCase):
         (folder / 'rollout-a.jsonl').write_text(first)
         (folder / 'rollout-b.jsonl').write_text(first)
         self.assertEqual(ns.plan_chats(incoming, self.codex)[0]['relation'], 'AMBIGUOUS')
+
+    def test_catalog_uses_thread_id_when_session_is_shared(self):
+        incoming = self.root / 'incoming'
+        folder = incoming / 'sessions'
+        folder.mkdir(parents=True)
+        for thread in ('thread-a', 'thread-b'):
+            (folder / f'rollout-{thread}.jsonl').write_text(json.dumps({
+                'type': 'session_meta', 'payload': {'id': thread, 'session_id': 'shared', 'history_mode': 'paginated'}
+            }) + '\n')
+        (folder / 'rollout-legacy.jsonl').write_text(json.dumps({
+            'type': 'session_meta', 'payload': {'session_id': 'legacy'}
+        }) + '\n')
+        catalog = ns._chat_catalog(incoming, include_unsupported=True)
+        self.assertEqual(set(catalog), {'thread-a', 'thread-b', 'legacy'})
+        self.assertTrue(all(len(entries) == 1 for entries in catalog.values()))
 
     def test_chat_plan_compares_only_structured_paths_across_systems(self):
         incoming = self.root / 'incoming'
