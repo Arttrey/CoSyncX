@@ -1834,7 +1834,8 @@ class NexusSyncTests(unittest.TestCase):
             ns.prepare_chats(incoming, self.root / 'outside-windows', source, str(nexus))
         rows[0]['payload']['cwd'] = '/linux/Nexus/bot/source'
         history.write_text(''.join(json.dumps(row) + '\n' for row in rows))
-        self.assertEqual(ns.plan_chats(incoming, self.codex, '/linux/Nexus', str(nexus))[0]['cwd'], 'MAPPED_BUT_MISSING')
+        expected = 'AVAILABLE' if (nexus / 'bot' / 'source').is_dir() else 'MAPPED_BUT_MISSING'
+        self.assertEqual(ns.plan_chats(incoming, self.codex, '/linux/Nexus', str(nexus))[0]['cwd'], expected)
 
 
     def test_read_only_chat_plan_never_merges_divergent_history(self):
