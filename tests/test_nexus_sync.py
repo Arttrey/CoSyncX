@@ -1085,7 +1085,7 @@ class NexusSyncTests(unittest.TestCase):
             started.set()
             self.assertTrue(release.wait(timeout=3))
             return []
-        def chat_work(_cfg, previous, ):
+        def chat_work(_cfg, previous, **_kwargs):
             cycles.append(1)
             if len(cycles) == 2:
                 self.assertTrue(started.is_set())
@@ -1811,14 +1811,19 @@ class NexusSyncTests(unittest.TestCase):
         self.assertEqual(mapped[1]['payload']['message'], old)
         self.assertEqual(history.read_bytes(), original)
         self.assertEqual(self.chat.read_bytes(), local_before)
-        (nexus / 'bot').mkdir()
-        plan = ns.plan_chats(incoming, self.codex, source, str(nexus))[0]
-        self.assertEqual(plan['cwd'], 'MAPPED_AMBIGUOUS')
-        self.assertEqual(plan['relation'], 'DIVERGED')
-        with self.assertRaises(ns.SyncError):
-            ns.prepare_chats(incoming, self.root / 'ambiguous-windows', source, str(nexus))
-        self.assertFalse((self.root / 'ambiguous-windows').exists())
-        (nexus / 'bot').rmdir()
+        try:
+            (nexus / 'bot').mkdir()
+        except FileExistsError:
+            # The volume itself cannot represent two case-distinct names.
+            pass
+        else:
+            plan = ns.plan_chats(incoming, self.codex, source, str(nexus))[0]
+            self.assertEqual(plan['cwd'], 'MAPPED_AMBIGUOUS')
+            self.assertEqual(plan['relation'], 'DIVERGED')
+            with self.assertRaises(ns.SyncError):
+                ns.prepare_chats(incoming, self.root / 'ambiguous-windows', source, str(nexus))
+            self.assertFalse((self.root / 'ambiguous-windows').exists())
+            (nexus / 'bot').rmdir()
         outside = self.root / 'outside'
         outside.mkdir()
         (nexus / 'escape').symlink_to(outside, target_is_directory=True)
