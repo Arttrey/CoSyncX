@@ -42,8 +42,13 @@ until the relevant workflows have been independently verified.
 ## Design and current boundaries
 
 - A Syncthing folder transports project files, and a separate exchange folder
-  transports encrypted snapshots. A relay can keep data available while a
-  device is offline. Folder modes are configured in Syncthing itself.
+  transports encrypted snapshots. A VPS running a Syncthing storage node can
+  keep data available while a device is offline. Folder modes are configured
+  in Syncthing itself.
+- An experimental standalone Linux build can include a verified Syncthing
+  executable; a separate mode can read the status of an existing local
+  Syncthing instance. Managed profiles default to loopback-only; connecting
+  peers and folders requires explicit setup. See [engine documentation](docs/ENGINE.md).
 - Every device has its own project root, Codex profile, key, and local state.
   Paths from another device are mapped to the configured local project root;
   historical message text is not rewritten.

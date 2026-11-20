@@ -4540,19 +4540,19 @@ def run_supervisor(settings_path: Path) -> None:
             time.sleep(cfg['interval_seconds'])
 
 
-def render_startup(platform: str, machine: str, python: str, script: str, config: str) -> tuple[str, bytes]:
+def render_startup(platform: str, machine: str, python: str, script: str | None, config: str) -> tuple[str, bytes]:
     """Render an inactive per-user startup file without executing it."""
     _safe_machine(machine)
     if platform not in ('linux', 'macos', 'windows'):
         raise SyncError('Неизвестная ОС для файла автозапуска')
     path_type = PureWindowsPath if platform == 'windows' else PurePosixPath
-    for value in (python, script, config):
+    for value in (python, *([script] if script is not None else []), config):
         if not isinstance(value, str) or any(ord(char) < 32 for char in value):
             raise SyncError('Путь содержит недопустимые символы')
         path = path_type(value)
         if not path.is_absolute() or '..' in path.parts:
             raise SyncError('Для автозапуска нужны абсолютные локальные пути')
-    args = [python, script, 'run', '--config', config]
+    args = [python, *([script] if script is not None else []), 'run', '--config', config]
     if platform == 'linux':
         def quote(value):
             return '"' + value.replace('%', '%%').replace('\\', '\\\\').replace('"', '\\"') + '"'
@@ -4598,7 +4598,7 @@ def generate_startup(settings_path: Path, destination: Path) -> Path:
     if platform is None:
         raise SyncError('ОС пока не поддерживается')
     executable = Path(sys.executable).absolute()  # Preserve a virtualenv symlink.
-    script = Path(__file__).resolve(strict=True)
+    script = None if getattr(sys, 'frozen', False) else str(Path(__file__).resolve(strict=True))
     config = settings_path.resolve(strict=True)
     if not executable.is_file():
         raise SyncError('Интерпретатор Python не найден')
@@ -4609,7 +4609,7 @@ def generate_startup(settings_path: Path, destination: Path) -> Path:
     for root in (cfg['nexus'], cfg['codex_home'], cfg['shared']):
         if parent == root or root in parent.parents:
             raise SyncError('Шаблон создаётся вне Nexus, Codex и общей папки')
-    name, content = render_startup(platform, cfg['machine'], str(executable), str(script), str(config))
+    name, content = render_startup(platform, cfg['machine'], str(executable), script, str(config))
     destination.mkdir(mode=0o700)
     fd = os.open(destination / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, 'wb') as output:
@@ -4618,7 +4618,8 @@ def generate_startup(settings_path: Path, destination: Path) -> Path:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description='Nexus Sync: безопасная подготовка обмена через Syncthing')
+    parser = argparse.ArgumentParser(description='CoSyncX: безопасная подготовка обмена через Syncthing',
+                                     epilog='Движок: cosyncx engine --help; подготовка сборки: cosyncx build-engine --help')
     sub = parser.add_subparsers(dest='command', required=True)
     run = sub.add_parser('run', help='запустить локальный наблюдатель по конфигурации устройства')
     run.add_argument('--config', type=Path, required=True)

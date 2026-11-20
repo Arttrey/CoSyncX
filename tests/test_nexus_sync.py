@@ -1835,6 +1835,16 @@ class NexusSyncTests(unittest.TestCase):
         with self.assertRaises(ns.SyncError):
             ns.generate_startup(config, out)
 
+    def test_startup_template_supports_standalone_binary(self):
+        _, unit = ns.render_startup('linux', 'test', '/opt/CoSyncX/cosyncx', None, '/tmp/config.json')
+        self.assertIn('ExecStart=:"/opt/CoSyncX/cosyncx" "run" "--config" "/tmp/config.json"', unit.decode())
+        _, xml = ns.render_startup('windows', 'test', r'C:\Apps\cosyncx.exe', None, r'C:\config.json')
+        root = ET.fromstring(xml)
+        namespace = {'t': 'http://schemas.microsoft.com/windows/2004/02/mit/task'}
+        self.assertEqual(root.find('.//t:Command', namespace).text, r'C:\Apps\cosyncx.exe')
+        self.assertEqual(root.find('.//t:Arguments', namespace).text,
+                         subprocess.list2cmdline(['run', '--config', r'C:\config.json']))
+
     def test_watch_retries_after_a_partial_write_then_stops_without_duplicates(self):
         self.chat.write_bytes(b'{"partial":')
         ticks = 0
