@@ -1,0 +1,45 @@
+/* CoSyncX additions; MIT. The upstream Syncthing interface is MPL-2.0. */
+:root {
+  --cosync-accent: #168f80;
+  --cosync-notice-bg: #e9f5f2;
+  --cosync-notice-text: #164f47;
+  --cosync-line: #b6d8d0;
+}
+
+.cosyncx-nav .cosyncx-brand {
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  color: var(--cosync-accent);
+}
+
+.cosyncx-intro {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 0 1.5rem;
+}
+
+.cosyncx-intro h1 {
+  margin: 0 0 0.25rem;
+  font-size: 2rem;
+  font-weight: 700;
+}
+
+.cosyncx-intro p { margin: 0; }
+
+.cosyncx-intro .cosyncx-notice {
+  border: 1px solid var(--cosync-line);
+  border-radius: 0.4rem;
+  background: var(--cosync-notice-bg);
+  color: var(--cosync-notice-text);
+  padding: 0.65rem 0.85rem;
+  max-width: 30rem;
+}
+
+.cosyncx-nav a:focus-visible,
+.cosyncx-nav button:focus-visible {
+  outline: 2px solid var(--cosync-accent);
+  outline-offset: 2px;
+}

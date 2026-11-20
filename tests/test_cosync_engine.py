@@ -75,6 +75,8 @@ class EngineTests(unittest.TestCase):
         self.assertIn('--no-browser', command)
         self.assertIn('--no-upgrade', command)
         self.assertIn(str(home), command)
+        self.assertIn('--debug-gui-assets-dir', command)
+        self.assertEqual(Path(command[command.index('--debug-gui-assets-dir') + 1]), engine.gui_assets_dir())
 
     def test_unified_launcher_routes_engine_commands(self):
         with mock.patch.object(engine, 'main', return_value=7) as command:

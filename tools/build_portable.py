@@ -45,7 +45,9 @@ def main():
         subprocess.run([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile',
                         '--name', 'cosyncx', '--distpath', str(tmp / 'dist'),
                         '--workpath', str(tmp / 'work'), '--specpath', str(tmp / 'spec'),
-                        '--add-binary', str(engine / binary_name) + ':.', str(ROOT / 'src/cosyncx.py')],
+                        '--add-binary', str(engine / binary_name) + ':.',
+                        '--add-data', str(ROOT / 'src/cosyncx_gui') + ':cosyncx_gui',
+                        str(ROOT / 'src/cosyncx.py')],
                        check=True, cwd=ROOT)
         output.mkdir(mode=0o700)
         executable = 'cosyncx.exe' if system == 'windows' else 'cosyncx'

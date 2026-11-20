@@ -33,6 +33,14 @@ def bundled_binary() -> Path:
     return binary.resolve()
 
 
+def gui_assets_dir() -> Path:
+    base = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
+    directory = base / 'cosyncx_gui'
+    if directory.is_symlink() or not (directory / 'default' / 'index.html').is_file():
+        raise EngineError('CoSyncX interface files are unavailable')
+    return directory.resolve()
+
+
 def clean_environment() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if not key.upper().startswith('ST')}
 
@@ -101,7 +109,8 @@ def run_managed(binary: Path, home: Path) -> int:
             or config.is_symlink() or not config.is_file()):
         raise EngineError('Not an isolated CoSyncX engine profile')
     result = subprocess.run([str(binary), 'serve', '--home', str(home), '--no-browser', '--no-restart',
-                             '--no-upgrade', '--log-file=-'], env=clean_environment())
+                             '--no-upgrade', '--log-file=-', '--debug-gui-assets-dir', str(gui_assets_dir())],
+                            env=clean_environment())
     return result.returncode
 
 

@@ -4619,7 +4619,7 @@ def generate_startup(settings_path: Path, destination: Path) -> Path:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description='CoSyncX: безопасная подготовка обмена через Syncthing',
-                                     epilog='Движок: cosyncx engine --help; подготовка сборки: cosyncx build-engine --help')
+                                     epilog='Интерфейс: cosyncx ui --help; движок: cosyncx engine --help; подготовка сборки: cosyncx build-engine --help')
     sub = parser.add_subparsers(dest='command', required=True)
     run = sub.add_parser('run', help='запустить локальный наблюдатель по конфигурации устройства')
     run.add_argument('--config', type=Path, required=True)

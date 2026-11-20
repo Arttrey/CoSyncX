@@ -49,6 +49,9 @@ until the relevant workflows have been independently verified.
   executable; a separate mode can read the status of an existing local
   Syncthing instance. Managed profiles default to loopback-only; connecting
   peers and folders requires explicit setup. See [engine documentation](docs/ENGINE.md).
+- `cosyncx ui` provides a simplified interface derived from Syncthing's GUI
+  for either a managed instance or an existing local Syncthing 2.1.7 instance.
+  The upstream-derived files retain their MPL-2.0 license.
 - Every device has its own project root, Codex profile, key, and local state.
   Paths from another device are mapped to the configured local project root;
   historical message text is not rewritten.

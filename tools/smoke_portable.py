@@ -49,6 +49,11 @@ def main():
                 time.sleep(0.25)
             if not ready:
                 raise RuntimeError('Bundled engine did not become reachable')
+            request = urllib.request.Request(url + '/', headers={'Range': 'bytes=0-2047'})
+            with opener.open(request, timeout=8) as response:
+                page = response.read()
+            if b'CoSyncX' not in page or b'SyncthingController' not in page:
+                raise RuntimeError('Modified Syncthing interface was not served')
         finally:
             if ready and process.poll() is None:
                 request = urllib.request.Request(url + '/rest/system/shutdown', data=b'', method='POST',
