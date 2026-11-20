@@ -1976,6 +1976,23 @@ class NexusSyncTests(unittest.TestCase):
         self.assertEqual(state('missing'), 'MISSING')
         self.assertEqual(state('bad'), 'INVALID')
 
+    def test_plan_reports_missing_parent_without_importing_archives(self):
+        incoming = self.root / 'incoming'
+        folder = incoming / 'sessions'
+        folder.mkdir(parents=True)
+        for identity, parent in [('parent', None), ('child', 'parent'), ('orphan', 'absent'), ('self', 'self')]:
+            payload = {'id': identity, 'history_mode': 'paginated'}
+            if parent is not None:
+                payload['parent_thread_id'] = parent
+            (folder / f'rollout-{identity}.jsonl').write_text(json.dumps({'type': 'session_meta', 'payload': payload}) + '\n')
+        plan = {item['chat_hash']: item for item in ns.plan_chats(incoming, self.codex)}
+        def state(identity):
+            return plan[hashlib.sha256(identity.encode()).hexdigest()]['parent_thread']
+        self.assertEqual(state('parent'), 'NOT_REQUIRED')
+        self.assertEqual(state('child'), 'PRESENT_UNVERIFIED')
+        self.assertEqual(state('orphan'), 'MISSING')
+        self.assertEqual(state('self'), 'INVALID')
+
     def test_chat_plan_compares_only_structured_paths_across_systems(self):
         incoming = self.root / 'incoming'
         folder = incoming / 'sessions'
