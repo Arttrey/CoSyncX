@@ -5,6 +5,7 @@ import cosync_engine
 import cosync_vendor
 import cosync_proxy
 import nexus_sync
+import cosync_extensions
 
 
 def main(argv=None) -> int:
@@ -15,6 +16,8 @@ def main(argv=None) -> int:
         return cosync_proxy.main(arguments[1:])
     if arguments and arguments[0] == 'build-engine':
         return cosync_vendor.main(arguments[1:])
+    if arguments and arguments[0] == 'extensions':
+        return cosync_extensions.main(arguments[1:])
     return nexus_sync.main(arguments)
 
 

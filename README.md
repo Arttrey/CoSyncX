@@ -14,6 +14,25 @@ The experimental restore reload handler and single-generation backup helper are
 not connected to a production receiver. They do not enable automatic import or
 reload of real chats. The mock receiver also supports macOS in isolated tests.
 
+`cosyncx extensions export` can create a separately encrypted bundle of custom
+skills, hooks, rules, plugin files, `AGENTS.md` and `config.toml`. The config can
+contain secrets and machine-specific paths. The bundle also records plugin cache
+names as an inventory, not proof that plugins are installed. Built-in skills,
+plugin cache contents, local dependency/build directories and recognized
+platform binaries are excluded and listed in the encrypted exclusion report.
+`cosyncx extensions extract` only unpacks into a new quarantine directory; it
+does not install, execute or apply extensions or configuration. Bundle creation,
+transport, dependency installation and restoration are not yet automatic.
+
+```sh
+cosyncx keygen /path/outside/syncthing/extensions.key
+cosyncx extensions export --codex-home "$HOME/.codex" --output /path/to/shared/extensions.bundle --key-file /path/outside/syncthing/extensions.key
+cosyncx extensions extract --bundle /path/to/shared/extensions.bundle --destination /path/to/new/quarantine --key-file /path/outside/syncthing/extensions.key
+```
+
+Transfer the key separately and securely. Never point extraction at a live Codex
+profile; review paths and hook commands before applying them on another OS.
+
 Syncthing can also transfer the existing `sessions` and `archived_sessions`
 directories directly. Folder encryption and direct transfer require independent
 validation, careful exclusion of credentials, and safe key management. The
