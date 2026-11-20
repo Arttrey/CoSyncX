@@ -1958,6 +1958,24 @@ class NexusSyncTests(unittest.TestCase):
         self.assertEqual(set(catalog), {'thread-a', 'thread-b', 'legacy'})
         self.assertTrue(all(len(entries) == 1 for entries in catalog.values()))
 
+    def test_plan_reports_history_base_without_assuming_it_is_complete(self):
+        incoming = self.root / 'incoming'
+        folder = incoming / 'sessions'
+        folder.mkdir(parents=True)
+        for identity, base in [('present', None), ('child', {'thread_id': 'present'}),
+                               ('missing', {'thread_id': 'absent'}), ('bad', {'unexpected': 1})]:
+            payload = {'id': identity, 'history_mode': 'paginated'}
+            if base is not None:
+                payload['history_base'] = base
+            (folder / f'rollout-{identity}.jsonl').write_text(json.dumps({'type': 'session_meta', 'payload': payload}) + '\n')
+        plan = {item['chat_hash']: item for item in ns.plan_chats(incoming, self.codex)}
+        def state(identity):
+            return plan[hashlib.sha256(identity.encode()).hexdigest()]['history_base']
+        self.assertEqual(state('present'), 'NOT_REQUIRED')
+        self.assertEqual(state('child'), 'PRESENT_UNVERIFIED')
+        self.assertEqual(state('missing'), 'MISSING')
+        self.assertEqual(state('bad'), 'INVALID')
+
     def test_chat_plan_compares_only_structured_paths_across_systems(self):
         incoming = self.root / 'incoming'
         folder = incoming / 'sessions'

@@ -667,7 +667,8 @@ def _chat_catalog(root: Path, *, include_unsupported: bool = False) -> dict[str,
                 unsupported = 'PAGINATED' if mode == 'paginated' else 'UNKNOWN_FORMAT' if mode not in (None, 'legacy') else None
                 if unsupported and not include_unsupported:
                     raise UnsupportedHistoryError('Пагинированная история пока не поддерживается' if unsupported == 'PAGINATED' else 'Неизвестный формат истории пока не поддерживается')
-                catalogue.setdefault(identifier, []).append({'path': path, 'cwd': payload.get('cwd'), 'folder': folder, 'unsupported': unsupported})
+                catalogue.setdefault(identifier, []).append({'path': path, 'cwd': payload.get('cwd'), 'folder': folder, 'unsupported': unsupported,
+                                                            'history_base': payload.get('history_base')})
             except (ValueError, UnicodeError) as exc:
                 raise SyncError('Неподдерживаемые метаданные чата; сравнение остановлено') from exc
     return catalogue
@@ -844,6 +845,18 @@ def plan_chats(incoming: Path, target: Path, source_root: str | None = None, tar
     plan = []
     for identifier, versions in sorted(sources.items()):
         local = targets.get(identifier, [])
+        base_status = 'AMBIGUOUS' if len(versions) != 1 else 'NOT_REQUIRED'
+        if len(versions) == 1 and versions[0].get('history_base') is not None:
+            base = versions[0]['history_base']
+            base_id = base.get('thread_id') if isinstance(base, dict) else None
+            if not isinstance(base_id, str) or not base_id:
+                base_status = 'INVALID'
+            elif len(sources.get(base_id, [])) == 1 or len(targets.get(base_id, [])) == 1:
+                base_status = 'PRESENT_UNVERIFIED'
+            elif sources.get(base_id) or targets.get(base_id):
+                base_status = 'AMBIGUOUS'
+            else:
+                base_status = 'MISSING'
         if len(versions) != 1 or len(local) > 1:
             relation = 'AMBIGUOUS'
         elif versions[0]['unsupported']:
@@ -868,7 +881,8 @@ def plan_chats(incoming: Path, target: Path, source_root: str | None = None, tar
         if source_root and target_root:
             cwd_status = _history_cwd_status(versions[0]['path'], source_root, target_root)
         plan.append({'chat_hash': hashlib.sha256(identifier.encode('utf-8')).hexdigest(), 'relation': relation, 'cwd': cwd_status,
-                     'incoming_format_warning': versions[0]['unsupported'] if len(versions) == 1 else None})
+                     'incoming_format_warning': versions[0]['unsupported'] if len(versions) == 1 else None,
+                     'history_base': base_status})
     return plan
 
 
