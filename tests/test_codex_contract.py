@@ -17,6 +17,7 @@ import unittest
 import nexus_sync as ns
 import mock_chat_sync as mock_sync
 import mock_chat_preview
+import cosync_lineage
 
 
 CODEX_EXECUTABLE = os.environ.get('NEXUS_TEST_CODEX_EXECUTABLE') or shutil.which('codex')
@@ -54,6 +55,45 @@ def stop_server(process):
 
 @unittest.skipUnless(os.environ.get('NEXUS_TEST_CODEX') == '1' and CODEX_EXECUTABLE, 'requires disposable Codex experiment')
 class CodexContractTests(unittest.TestCase):
+    def test_rewritten_pagination_opens_with_real_codex(self):
+        with tempfile.TemporaryDirectory(prefix='cosyncx-lineage-contract-') as tmp:
+            root = Path(tmp).resolve()
+            incoming = root / 'incoming'
+            folder = incoming / 'sessions' / '2026' / '01' / '01'
+            folder.mkdir(parents=True)
+            nexus = root / 'Nexus'
+            nexus.mkdir()
+            thread = '019b0000-0000-7000-8000-000000000001'
+            page = '019b0000-0000-7000-8000-000000000002'
+            stem = f'rollout-2026-01-01T00-00-00-{thread}'
+            initial = folder / (stem + '.jsonl')
+            metadata = {'id': thread, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': '/source/Nexus',
+                        'originator': 'codex_vscode', 'cli_version': '0.1.0', 'source': 'vscode',
+                        'model_provider': 'openai', 'history_mode': 'paginated'}
+            rows = [{'timestamp': '2026-01-01T00:00:00.000Z', 'type': 'session_meta', 'payload': metadata, 'ordinal': 0},
+                    {'timestamp': '2026-01-01T00:00:01.000Z', 'type': 'event_msg',
+                     'payload': {'type': 'user_message', 'message': 'synthetic before', 'images': [], 'local_images': [], 'text_elements': []}, 'ordinal': 1}]
+            initial.write_text(''.join(json.dumps(x) + '\n' for x in rows))
+            child_meta = dict(metadata, history_base={'thread_id': thread, 'end_byte_offset': initial.stat().st_size, 'end_ordinal_exclusive': 2})
+            later = folder / (stem + '_' + page + '.jsonl')
+            later.write_text(json.dumps({'timestamp': '2026-01-01T00:00:02.000Z', 'type': 'session_meta', 'payload': child_meta, 'ordinal': 2}) + '\n')
+            prepared = root / 'prepared'
+            self.assertEqual(cosync_lineage.prepare_lineage(incoming, prepared, thread, [('/source/Nexus', str(nexus))]), 2)
+            env = {**os.environ, 'CODEX_HOME': str(prepared)}
+            server = subprocess.Popen([CODEX_EXECUTABLE, 'app-server', '--listen', 'stdio://'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0, env=env)
+            try:
+                def call(number, method, params):
+                    server.stdin.write((json.dumps({'id': number, 'method': method, 'params': params}) + '\n').encode())
+                    server.stdin.flush()
+                    return read_rpc_response(server, number)
+                self.assertIn('result', call(1, 'initialize', {'clientInfo': {'name': 'cosyncx-lineage-test', 'version': '0.1'}, 'capabilities': {'experimentalApi': True}}))
+                server.stdin.write(b'{"method":"initialized","params":{}}\n')
+                server.stdin.flush()
+                response = call(2, 'thread/resume', {'threadId': thread, 'path': str(prepared / later.relative_to(incoming)), 'cwd': str(nexus)})
+                self.assertIn('result', response, str(response.get('error')))
+                self.assertIn('result', call(3, 'thread/turns/list', {'threadId': thread, 'itemsView': 'full', 'limit': 10}))
+            finally:
+                stop_server(server)
     @unittest.skipUnless(sys.platform == 'linux', 'mock preview receiver requires Linux')
     def test_preview_maps_windows_and_mac_paths_without_rewriting_chat_text(self):
         sources = [('windows', r'C:\Mock User\Nexus', r'C:\Mock User\Nexus\bot', '000000000096'),

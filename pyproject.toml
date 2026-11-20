@@ -20,7 +20,7 @@ nexus-sync = "nexus_sync:main"
 [tool.setuptools]
 package-dir = {"" = "src"}
 packages = ["cosyncx_gui"]
-py-modules = ["nexus_sync", "cosyncx", "cosync_engine", "cosync_proxy", "cosync_vendor", "cosync_restore_backup", "cosync_extensions", "mock_chat_preview", "mock_chat_sync", "mock_loopback_proxy", "mock_syncthing_status"]
+py-modules = ["nexus_sync", "cosyncx", "cosync_engine", "cosync_proxy", "cosync_vendor", "cosync_restore_backup", "cosync_extensions", "cosync_lineage", "mock_chat_preview", "mock_chat_sync", "mock_loopback_proxy", "mock_syncthing_status"]
 
 [tool.setuptools.package-data]
 cosyncx_gui = ["LICENSE", "UPSTREAM.md", "default/index.html", "default/assets/css/*.css", "default/assets/lang/*.json"]

@@ -13,6 +13,9 @@ does not prove that a chat is available or up to date in Codex.
 The experimental restore reload handler and single-generation backup helper are
 not connected to a production receiver. They do not enable automatic import or
 reload of real chats. The mock receiver also supports macOS in isolated tests.
+The experimental `cosyncx prepare-lineage` command rewrites structured project
+paths and dependent byte offsets for a complete paginated thread into a new
+isolated directory. It does not import chats or rebuild the live Codex index.
 
 `cosyncx extensions export` can create a separately encrypted bundle of custom
 skills, hooks, rules, plugin files, `AGENTS.md` and `config.toml`. The config can

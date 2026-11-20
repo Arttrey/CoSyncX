@@ -688,6 +688,56 @@ def _is_prefix(left: Path, right: Path) -> bool:
                 return False
 
 
+def _paged_lineage(versions: list[dict], thread_id: str) -> str:
+    """Read-only lineage check, not evidence of a complete restored index."""
+    pages = {}
+    pattern = re.compile(r'-([0-9a-fA-F-]{36})(?:_([0-9a-fA-F-]{36}))?\.jsonl$')
+    try:
+        for item in versions:
+            match = pattern.search(item['path'].name)
+            if not match or str(uuid.UUID(match.group(1))) != thread_id.lower():
+                return 'UNKNOWN_LAYOUT'
+            page = str(uuid.UUID(match.group(2))) if match.group(2) else thread_id.lower()
+            if page in pages or item.get('unsupported') != 'PAGINATED':
+                return 'AMBIGUOUS'
+            pages[page] = item
+        roots = 0
+        links = {}
+        for page, item in pages.items():
+            base = item.get('history_base')
+            if base is None:
+                if page != thread_id.lower(): return 'UNKNOWN_LAYOUT'
+                roots += 1
+                continue
+            if not isinstance(base, dict): return 'INVALID'
+            parent, offset, ordinal = base.get('thread_id'), base.get('end_byte_offset'), base.get('end_ordinal_exclusive')
+            if not isinstance(parent, str) or type(offset) is not int or offset <= 0 or type(ordinal) is not int or ordinal < 0:
+                return 'INVALID'
+            parent = str(uuid.UUID(parent))
+            if parent not in pages: return 'MISSING_SOURCE'
+            if parent == page: return 'INVALID'
+            source = pages[parent]['path']
+            before = source.stat()
+            if offset > before.st_size: return 'INCOMPLETE_SOURCE'
+            with source.open('rb') as stream:
+                stream.seek(offset - 1)
+                if stream.read(1) != b'\n': return 'INVALID_BOUNDARY'
+            after = source.stat()
+            if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+                return 'UNSTABLE'
+            links[page] = parent
+        if roots != 1: return 'MISSING_SOURCE'
+        for page in pages:
+            seen = set()
+            while page in links:
+                if page in seen: return 'INVALID'
+                seen.add(page)
+                page = links[page]
+        return 'PRESENT_UNVERIFIED'
+    except (ValueError, OSError, KeyError):
+        return 'INVALID'
+
+
 def _path_adjusted_relation(incoming: Path, local: Path, source_root: str, target_root: str) -> str:
     """Compare JSON records after normalizing only known structured cwd fields."""
     def normalized(line: bytes, root: str) -> str:
@@ -847,6 +897,7 @@ def plan_chats(incoming: Path, target: Path, source_root: str | None = None, tar
     plan = []
     for identifier, versions in sorted(sources.items()):
         local = targets.get(identifier, [])
+        lineage = _paged_lineage(versions, identifier) if versions and all(x['unsupported'] == 'PAGINATED' for x in versions) else None
         thread_source = versions[0].get('thread_source') if len(versions) == 1 else None
         thread_kind = 'USER' if thread_source == 'user' else 'SERVICE' if thread_source in ('subagent', 'guardian_review') else 'UNKNOWN'
         parent_status = 'AMBIGUOUS' if len(versions) != 1 else 'NOT_REQUIRED'
@@ -915,7 +966,7 @@ def plan_chats(incoming: Path, target: Path, source_root: str | None = None, tar
         plan.append({'chat_hash': hashlib.sha256(identifier.encode('utf-8')).hexdigest(), 'relation': relation, 'cwd': cwd_status,
                      'incoming_format_warning': versions[0]['unsupported'] if len(versions) == 1 else None,
                      'history_base': base_status, 'parent_thread': parent_status, 'thread_kind': thread_kind,
-                     'paginated_relation_unverified': paginated_relation})
+                     'paginated_relation_unverified': paginated_relation, 'paginated_lineage': lineage})
     return plan
 
 

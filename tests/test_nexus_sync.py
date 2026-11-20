@@ -221,6 +221,36 @@ class NexusSyncTests(unittest.TestCase):
         self.assertEqual(row['paginated_relation_unverified'], 'INCOMING_EXTENDS_AFTER_PATH_MAPPING')
         self.assertEqual(self.chat.read_bytes(), before)
 
+    def test_paginated_lineage_checks_all_source_pages(self):
+        incoming = self.root / 'incoming'
+        folder = incoming / 'sessions'
+        folder.mkdir(parents=True)
+        thread = '019b0000-0000-7000-8000-000000000001'
+        page1 = '019b0000-0000-7000-8000-000000000002'
+        page2 = '019b0000-0000-7000-8000-000000000003'
+        def write(suffix, base=None):
+            payload = {'id': thread, 'history_mode': 'paginated'}
+            if base is not None:
+                payload['history_base'] = {'thread_id': base, 'end_byte_offset': 1, 'end_ordinal_exclusive': 1}
+            path = folder / f'rollout-2026-01-01T00-00-00-{thread}{suffix}.jsonl'
+            path.write_text(json.dumps({'type': 'session_meta', 'payload': payload}) + '\n')
+            return path
+        base_file = write('')
+        first = write('_' + page1, thread)
+        second = write('_' + page2, page1)
+        # Point to real record boundaries; a byte offset inside JSON is invalid.
+        def set_base(path, parent):
+            row = json.loads(path.read_text())
+            row['payload']['history_base']['end_byte_offset'] = parent.stat().st_size
+            path.write_text(json.dumps(row) + '\n')
+        set_base(first, base_file)
+        set_base(second, first)
+        entries = ns._chat_catalog(incoming, include_unsupported=True)[thread]
+        self.assertEqual(ns._paged_lineage(entries, thread), 'PRESENT_UNVERIFIED')
+        first.unlink()
+        entries = ns._chat_catalog(incoming, include_unsupported=True)[thread]
+        self.assertEqual(ns._paged_lineage(entries, thread), 'MISSING_SOURCE')
+
     def test_changed_source_is_refused(self):
         real_digest = ns._digest
         def change_before_digest(path):
