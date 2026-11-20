@@ -25,6 +25,12 @@
     "configuration": {
       "title": "CoSyncX",
       "properties": {
+        "nexusSync.autoReloadAfterRestore": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Перезагружать окно после подтверждённого восстановления и индексации чатов."
+        },
         "nexusSync.python": {
           "type": "string",
           "default": "python3",

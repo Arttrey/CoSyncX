@@ -1296,7 +1296,7 @@ class CodexContractTests(unittest.TestCase):
             finally:
                 stop_server(server)
 
-    @unittest.skipUnless(sys.platform == 'linux', 'mock watcher requires Linux')
+    @unittest.skipUnless(sys.platform in ('linux', 'darwin'), 'mock watcher requires Linux or macOS')
     def test_mock_watcher_receives_chats_from_windows_and_macos_paths(self):
         with tempfile.TemporaryDirectory(prefix='nexus-multi-chat-contract-') as tmp:
             root = Path(tmp)
@@ -1353,7 +1353,7 @@ class CodexContractTests(unittest.TestCase):
                     process.send_signal(signal.SIGINT)
                 process.wait(timeout=20)
 
-    @unittest.skipUnless(sys.platform == 'linux', 'mock watcher requires Linux')
+    @unittest.skipUnless(sys.platform in ('linux', 'darwin'), 'mock watcher requires Linux or macOS')
     def test_mock_watch_applies_later_chat_to_same_profile(self):
         with tempfile.TemporaryDirectory(prefix='nexus-mock-watch-contract-') as tmp:
             root = Path(tmp)
@@ -1439,7 +1439,7 @@ class CodexContractTests(unittest.TestCase):
                 process.wait(timeout=20)
             self.assertEqual(mock_sync.watch_status(profile, shared, key)['state'], 'STOPPED')
 
-    @unittest.skipUnless(sys.platform == 'linux', 'mock writer-lock experiment requires Linux')
+    @unittest.skipUnless(sys.platform in ('linux', 'darwin'), 'mock writer-lock experiment requires Linux or macOS')
     def test_mock_batch_indexes_multiple_new_chats(self):
         with tempfile.TemporaryDirectory(prefix='nexus-mock-batch-contract-') as tmp:
             root = Path(tmp)
@@ -1477,7 +1477,7 @@ class CodexContractTests(unittest.TestCase):
             self.assertEqual(repeated['state'], 'COMPLETE', repeated)
             self.assertEqual(repeated['results'], {'UNCHANGED': 2})
 
-    @unittest.skipUnless(sys.platform == 'linux', 'mock writer-lock experiment requires Linux')
+    @unittest.skipUnless(sys.platform in ('linux', 'darwin'), 'mock writer-lock experiment requires Linux or macOS')
     def test_mock_snapshot_application_waits_for_writer_and_is_resumable(self):
         with tempfile.TemporaryDirectory(prefix='nexus-mock-apply-contract-') as tmp:
             root = Path(tmp)

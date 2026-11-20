@@ -1,7 +1,34 @@
 const vscode = require('vscode');
 const { execFile } = require('child_process');
 
+// A transfer or a preview is not a restoration. Only a completed, indexed
+// restore may request a reload, and each window handles an event at most once.
+function makeRestoreReloader(vscode, workspaceState) {
+    let pending = false;
+    return async function maybeReload(event, enabled) {
+        if (!enabled || pending || !workspaceState || !event || event.state !== 'RESTORED'
+                || event.indexed !== true || !Number.isSafeInteger(event.changed_chats)
+                || event.changed_chats < 1 || typeof event.id !== 'string'
+                || !/^[0-9a-f]{32}$/.test(event.id)) return false;
+        const key = 'cosyncx.lastRestoredEvent';
+        if (workspaceState.get(key) === event.id) return false;
+        pending = true;
+        const previous = workspaceState.get(key);
+        try {
+            await workspaceState.update(key, event.id);
+            await vscode.commands.executeCommand('workbench.action.reloadWindow');
+            return true;
+        } catch (error) {
+            try { await workspaceState.update(key, previous); } catch (_) { /* retry on next start */ }
+            throw error;
+        } finally {
+            pending = false;
+        }
+    };
+}
+
 function activate(context) {
+    const maybeReload = makeRestoreReloader(vscode, context.workspaceState);
     const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 30);
     item.command = 'nexusSync.refresh';
     item.text = '$(sync) Nexus: настройка';
@@ -82,6 +109,9 @@ function activate(context) {
                     item.text = `$(cloud) Nexus: снимок ${data.confirmed_receivers}/${data.expected_receivers}`;
                 }
                 const mockPreview = data.mock_chat_preview;
+                // The receiver must publish this only after an actual indexed
+                // restore. Ordinary Syncthing status never triggers a reload.
+                maybeReload(data.restore_event, cfg.get('autoReloadAfterRestore') === true).catch(() => {});
                 const mockChat = data.mock_chat_watch;
                 const mockSyncthing = data.mock_syncthing_runtime;
                 if (mockSyncthing && mockSyncthing.state !== 'READY') {
@@ -140,3 +170,4 @@ function activate(context) {
     refresh();
 }
 exports.activate = activate;
+exports.makeRestoreReloader = makeRestoreReloader;

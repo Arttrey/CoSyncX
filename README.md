@@ -10,6 +10,10 @@ verified for real profiles. Use isolated test data for restoration. Do not
 automatically modify an active Codex profile. A Syncthing folder being in sync
 does not prove that a chat is available or up to date in Codex.
 
+The experimental restore reload handler and single-generation backup helper are
+not connected to a production receiver. They do not enable automatic import or
+reload of real chats. The mock receiver also supports macOS in isolated tests.
+
 Syncthing can also transfer the existing `sessions` and `archived_sessions`
 directories directly. Folder encryption and direct transfer require independent
 validation, careful exclusion of credentials, and safe key management. The

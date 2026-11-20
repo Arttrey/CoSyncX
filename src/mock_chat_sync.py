@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit Linux-only experiment for disposable synthetic Codex profiles."""
+"""Experiment for disposable synthetic Codex profiles on Linux and macOS."""
 from __future__ import annotations
 
 import argparse
@@ -70,8 +70,8 @@ def _validate_profile(path: Path, key: bytes) -> Path:
 
 @contextmanager
 def _mock_thread_lock(profile: Path, thread_id: str):
-    if sys.platform != 'linux':
-        raise ns.SyncError('Опыт с блокировкой доступен только на Linux')
+    if sys.platform not in ('linux', 'darwin'):
+        raise ns.SyncError('Опыт с блокировкой доступен только на Linux и macOS')
     import fcntl
     if not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', thread_id):
         raise ns.SyncError('Некорректный ID чата')
@@ -868,8 +868,8 @@ def watch_cycle(profile: Path, shared: Path, key: bytes, sources: list[tuple[str
 
 @contextmanager
 def _mock_watcher_lock(profile: Path, key: bytes):
-    if sys.platform != 'linux':
-        raise ns.SyncError('Моковый наблюдатель доступен только на Linux')
+    if sys.platform not in ('linux', 'darwin'):
+        raise ns.SyncError('Моковый наблюдатель доступен только на Linux и macOS')
     import fcntl
     profile = _validate_profile(profile, key)
     fd = os.open(profile / '.nexus-mock-watch.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
