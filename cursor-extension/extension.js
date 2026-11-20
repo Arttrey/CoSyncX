@@ -31,16 +31,9 @@ function activate(context) {
         const mockSyncthingFolder = cfg.get('mockSyncthingFolder');
         const mockSyncthingId = cfg.get('mockSyncthingId');
         const mockSyncthingPort = cfg.get('mockSyncthingPort');
-        const syncthingConfig = cfg.get('syncthingConfig');
-        const syncthingFolder = cfg.get('syncthingProjectFolder');
         if (!python || !script || (!configFile && (!shared || !machine))) {
             item.text = '$(sync) Nexus: настройка';
             item.tooltip = 'Укажите путь к программе, папку обмена и ID устройства в настройках Cursor.';
-            return;
-        }
-        if (Boolean(syncthingConfig) !== Boolean(syncthingFolder) || (syncthingConfig && !configFile)) {
-            item.text = '$(warning) Nexus: настройка Syncthing';
-            item.tooltip = 'Для проверки источника укажите конфигурацию Nexus Sync, файл Syncthing и ID папки проектов.';
             return;
         }
         if (mockChatProfile && !configFile) {
@@ -64,7 +57,6 @@ function activate(context) {
         if (mockSyncthingEnabled) args.push('--mock-syncthing-config', mockSyncthingConfig,
             '--mock-syncthing-folder', mockSyncthingFolder, '--mock-syncthing-id', mockSyncthingId,
             '--mock-syncthing-port', String(mockSyncthingPort));
-        if (configFile && syncthingConfig) args.push('--syncthing-config', syncthingConfig, '--syncthing-project-folder', syncthingFolder);
         if (!configFile && keyFile) args.push('--key-file', keyFile);
         execFile(python, args, { timeout: 15000, maxBuffer: 65536 }, (error, stdout) => {
             running = false;
@@ -92,10 +84,7 @@ function activate(context) {
                 const mockPreview = data.mock_chat_preview;
                 const mockChat = data.mock_chat_watch;
                 const mockSyncthing = data.mock_syncthing_runtime;
-                const syncthing = data.syncthing_source_config;
-                if (syncthing && syncthing.state !== 'CONFIG_MATCH') {
-                    item.text = '$(warning) Nexus: источник ?';
-                } else if (mockSyncthing && mockSyncthing.state !== 'READY') {
+                if (mockSyncthing && mockSyncthing.state !== 'READY') {
                     item.text = '$(warning) Nexus: тест сети';
                 } else if (mockPreview && ['ATTENTION', 'INVALID'].includes(mockPreview.state)) {
                     item.text = '$(warning) Nexus: мок ?';
@@ -105,10 +94,6 @@ function activate(context) {
                     item.text = '$(warning) Nexus: мок-приёмник ?';
                 } else if (data.state !== 'invalid' && data.observer && data.observer.state !== 'recent') {
                     item.text = data.observer.state === 'error' ? '$(warning) Nexus: ошибка' : '$(warning) Nexus: наблюдатель';
-                } else if (data.state !== 'invalid' && Number.isSafeInteger(data.outgoing_package_invalid) && data.outgoing_package_invalid > 0) {
-                    item.text = '$(warning) Nexus: пакет ?';
-                } else if (data.state !== 'invalid' && Number.isSafeInteger(data.prepared_secret_invalid) && data.prepared_secret_invalid > 0) {
-                    item.text = '$(warning) Nexus: карантин';
                 } else if (data.state !== 'invalid' && ((Number.isSafeInteger(data.auto_preview_invalid) && data.auto_preview_invalid > 0) || (Number.isSafeInteger(data.auto_preview_partial) && data.auto_preview_partial > 0))) {
                     item.text = '$(warning) Nexus: копии ?';
                 } else if (data.state !== 'invalid' && data.state !== 'snapshot_unverified' && ((Number.isSafeInteger(data.prepared_skipped) && data.prepared_skipped > 0) || (Number.isSafeInteger(data.prepared_incomplete) && data.prepared_incomplete > 0))) {
@@ -129,11 +114,6 @@ function activate(context) {
                     item.text = '$(inbox) Nexus: мок готов';
                 }
                 item.tooltip = data.message + (configFile ? '' : '; состояние наблюдателя не проверяется');
-                if (syncthing) {
-                    item.tooltip += syncthing.state === 'CONFIG_MATCH'
-                        ? '; файл конфигурации источника соответствует Send Only; действующая конфигурация Syncthing не проверена'
-                        : '; настройки источника требуют проверки; действующая конфигурация Syncthing не проверена';
-                }
                 if (mockPreview) {
                     const labels = { READY_LOCAL: 'отметка мокового профиля подтверждена', OUTDATED: 'доступен новый моковый снимок', NOT_PREPARED: 'моковая копия ещё не подготовлена', ATTENTION: 'незавершённая моковая попытка', INVALID: 'моковая отметка не подтверждена' };
                     item.tooltip += `; ${labels[mockPreview.state] || 'состояние моковой копии неизвестно'}; индекс, видимость в Cursor и актуальность VPS не подтверждены`;

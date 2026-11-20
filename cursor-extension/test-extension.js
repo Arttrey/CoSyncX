@@ -107,14 +107,6 @@ try {
     calls.shift().callback(null, JSON.stringify({state: 'snapshot_received', observer: {state: 'error'}, message: 'В последнем цикле были ошибки'}));
     assert(status.text.includes('ошибка'));
     command();
-    calls.shift().callback(null, JSON.stringify({state: 'snapshot_ready', observer: {state: 'recent'}, outgoing_package_invalid: 1, message: 'Исходящий пакет не подтверждён'}));
-    assert(status.text.includes('пакет ?'));
-    assert(status.tooltip.includes('не подтверждён'));
-    command();
-    calls.shift().callback(null, JSON.stringify({state: 'snapshot_ready', observer: {state: 'recent'}, prepared_secret_invalid: 1, message: 'Неподтверждённая отметка карантина'}));
-    assert(status.text.includes('карантин'));
-    assert(status.tooltip.includes('Неподтверждённая'));
-    command();
     calls.shift().callback(null, JSON.stringify({state: 'snapshot_received', observer: {state: 'recent'}, index_activity: 'running', message: 'Подготовка копии'}));
     assert(status.text.includes('индекс'));
     assert(status.tooltip.includes('Подготовка'));
@@ -166,23 +158,6 @@ try {
     command();
     calls.shift().callback(null, JSON.stringify({state: 'invalid', mock_chat_preview: {state: 'READY_LOCAL'}, message: 'Ошибка состояния'}));
     assert(status.text.includes('ошибка'));
-    config.syncthingConfig = '/tmp/syncthing-config.xml';
-    onConfiguration({ affectsConfiguration: () => true });
-    assert(status.text.includes('настройка Syncthing'));
-    assert.strictEqual(calls.length, 0);
-    config.syncthingProjectFolder = 'projects';
-    onConfiguration({ affectsConfiguration: () => true });
-    const sourceCheck = calls.shift();
-    assert.deepStrictEqual(sourceCheck.args.slice(1), ['summary', '--config', '/local/config.json',
-        '--mock-preview-root', '/tmp/mock-preview', '--syncthing-config', '/tmp/syncthing-config.xml',
-        '--syncthing-project-folder', 'projects']);
-    sourceCheck.callback(null, JSON.stringify({state: 'snapshot_ready', syncthing_source_config: {state: 'ATTENTION'}, message: 'Снимок'}));
-    assert(status.text.includes('источник ?'));
-    assert(status.tooltip.includes('действующая конфигурация Syncthing не проверена'));
-    command();
-    calls.shift().callback(null, JSON.stringify({state: 'snapshot_ready', syncthing_source_config: {state: 'CONFIG_MATCH'}, message: 'Снимок'}));
-    assert(status.text.includes('снимок'));
-    assert(status.tooltip.includes('файл конфигурации источника соответствует Send Only'));
     for (const entry of disposables) entry.dispose();
     process.stdout.write('Cursor status test: OK\n');
 } finally {

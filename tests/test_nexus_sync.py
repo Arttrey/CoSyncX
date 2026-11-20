@@ -31,15 +31,6 @@ class NexusSyncTests(unittest.TestCase):
         self.key = b'a' * 32
         self.chat.write_text('{"type":"session_meta","payload":{"id":"test"}}\n', encoding='utf-8')
 
-    def record_projects(self, *args, **kwargs):
-        return ns.record_projects(*args, key=self.key, **kwargs)
-
-    def project_log(self, *args, **kwargs):
-        return ns.project_log(*args, key=self.key, **kwargs)
-
-    def write_project_report(self, *args, **kwargs):
-        return ns.write_project_report(*args, key=self.key, **kwargs)
-
     def test_snapshot_can_be_delivered_and_detects_corruption(self):
         result = ns.snapshot(self.codex, self.shared, 'linux', self.key)
         self.assertEqual(len(ns.verify(result, self.key)['files']), 1)
@@ -420,7 +411,7 @@ class NexusSyncTests(unittest.TestCase):
         listing = ns.auto_preview_records(cfg, self.key)
         self.assertEqual([record['state'] for record in listing['records']], ['partial'])
         self.assertEqual(listing['records'][0]['scope'], 'peer')
-        ns.write_heartbeat(cfg, self.key, second, False, False)
+        ns.write_heartbeat(cfg, self.key, second)
         self.assertIn('index', ns.heartbeat_status(cfg, self.key)['errors'])
         (source / 'rollout-mock.jsonl').write_text(json.dumps({'type': 'session_meta',
             'payload': {'id': 'mock'}}) + '\n')
@@ -902,7 +893,7 @@ class NexusSyncTests(unittest.TestCase):
         self.assertEqual(ns.receive_once(self.shared, 'mac', self.key), 0)
         self.assertEqual(ns.receive_once(self.shared, 'linux', self.key), 0)
 
-    def test_supervisor_sends_once_and_initializes_project_baseline(self):
+    def test_supervisor_sends_once_without_project_scanning(self):
         nexus = self.root / 'Nexus'
         nexus.mkdir()
         (nexus / 'requirements.txt').write_text('example==1')
@@ -916,57 +907,13 @@ class NexusSyncTests(unittest.TestCase):
         cfg = ns.validate_settings(raw)
         previous, notes = ns.supervisor_once(cfg, None)
         self.assertTrue(any('снимок' in note for note in notes))
-        self.assertTrue((state / 'projects-linux.json').is_file())
-        report = state / 'project-changelog-linux.md'
-        self.assertIn('Python-окружение не найдено', report.read_text())
         self.assertEqual(ns.previous_supervisor_snapshot(cfg), previous)
         _, notes = ns.supervisor_once(cfg, previous)
         self.assertEqual(notes, [])
-        (nexus / 'requirements.txt').write_text('example==2')
-        _, notes = ns.supervisor_once(cfg, previous)
-        self.assertTrue(any('журнал' in note for note in notes))
-        self.assertIn('Изменён манифест', report.read_text())
-        self.assertNotIn('example==2', report.read_text())
-
-    def test_slow_git_worker_does_not_block_chat_cycles(self):
-        started = threading.Event()
-        release = threading.Event()
-        cycles = []
-        cfg = {'git_repos': [Path('/fake/repo')], 'interval_seconds': 10,
-               'key_file': self.root / 'fake-key', 'shared': self.shared}
-        def git_work(_cfg):
-            started.set()
-            if not release.wait(timeout=3):
-                raise AssertionError('test did not release Git worker')
-            return []
-        def chat_work(_cfg, previous, *, include_git):
-            self.assertFalse(include_git)
-            cycles.append(1)
-            if len(cycles) == 2:
-                self.assertTrue(started.is_set())
-                self.assertFalse(release.is_set())
-                release.set()
-            return previous, []
-        def tick(_seconds):
-            if len(cycles) == 1:
-                self.assertTrue(started.wait(timeout=3))
-            else:
-                raise KeyboardInterrupt
-        with mock.patch.object(ns, 'load_settings', return_value=cfg), \
-             mock.patch.object(ns, 'previous_supervisor_snapshot', return_value=None), \
-             mock.patch.object(ns, 'git_cycle', side_effect=git_work), \
-             mock.patch.object(ns, 'supervisor_once', side_effect=chat_work), \
-             mock.patch.object(ns, 'read_key', return_value=self.key), \
-             mock.patch.object(ns, 'write_heartbeat'), \
-             mock.patch.object(ns.time, 'sleep', side_effect=tick):
-            with self.assertRaises(KeyboardInterrupt):
-                ns.run_supervisor(self.root / 'unused.json')
-        self.assertEqual(len(cycles), 2)
-
     def test_windows_content_scan_does_not_block_other_supervisor_cycles(self):
         started, release, finished = threading.Event(), threading.Event(), threading.Event()
         observations = []
-        cfg = {'git_repos': [], 'interval_seconds': 10, 'key_file': self.root / 'fake-key',
+        cfg = {'interval_seconds': 10, 'key_file': self.root / 'fake-key',
                'shared': self.shared, 'codex_home': self.codex}
         def fingerprint_work(_cfg):
             started.set()
@@ -974,7 +921,7 @@ class NexusSyncTests(unittest.TestCase):
                 raise AssertionError('test did not release content scan')
             finished.set()
             return 'a' * 64
-        def cycle(_cfg, previous, *, include_git, fingerprint_override):
+        def cycle(_cfg, previous, *, fingerprint_override):
             observations.append(fingerprint_override)
             if len(observations) == 2:
                 self.assertFalse(release.is_set())
@@ -1015,11 +962,10 @@ class NexusSyncTests(unittest.TestCase):
         with mock.patch.object(ns, 'source_fingerprint', side_effect=AssertionError('unexpected inline scan')):
             previous, notes = ns.supervisor_once(cfg, None, fingerprint_override=None)
         self.assertIsNone(previous)
-        self.assertTrue((state / 'projects-windows.json').is_file())
         self.assertFalse((self.shared / 'nexus-sync' / 'snapshots' / 'windows').exists())
 
     def test_windows_content_scan_failure_is_reported_without_reusing_old_result(self):
-        cfg = {'git_repos': [], 'interval_seconds': 10, 'key_file': self.root / 'fake-key',
+        cfg = {'interval_seconds': 10, 'key_file': self.root / 'fake-key',
                'shared': self.shared, 'codex_home': self.codex}
         class FailedExecutor:
             def __enter__(self):
@@ -1031,7 +977,7 @@ class NexusSyncTests(unittest.TestCase):
                 result.set_exception(ns.SyncError('synthetic private error'))
                 return result
         cycles = []
-        def supervisor(_cfg, previous, *, include_git, fingerprint_override):
+        def supervisor(_cfg, previous, *, fingerprint_override):
             cycles.append(fingerprint_override)
             return previous, []
         def tick(_seconds):
@@ -1051,7 +997,7 @@ class NexusSyncTests(unittest.TestCase):
         self.assertTrue(any('Снимок отложен:' in note for note in heartbeat.call_args.args[2]))
 
     def test_windows_scan_error_remains_until_successful_scan(self):
-        cfg = {'git_repos': [], 'interval_seconds': 10, 'key_file': self.root / 'fake-key',
+        cfg = {'interval_seconds': 10, 'key_file': self.root / 'fake-key',
                'shared': self.shared, 'codex_home': self.codex}
         failed, pending, following = Future(), Future(), Future()
         failed.set_exception(ns.SyncError('synthetic failure'))
@@ -1065,7 +1011,7 @@ class NexusSyncTests(unittest.TestCase):
             def submit(self, *_args):
                 return next(sequence)
         cycles = []
-        def supervisor(_cfg, previous, *, include_git, fingerprint_override):
+        def supervisor(_cfg, previous, *, fingerprint_override):
             cycles.append(fingerprint_override)
             return previous, []
         def tick(_seconds):
@@ -1091,7 +1037,7 @@ class NexusSyncTests(unittest.TestCase):
         self.assertFalse(any(item.startswith('Снимок отложен:') for item in notes[3]))
 
     def test_windows_snapshot_error_remains_while_next_scan_is_pending(self):
-        cfg = {'git_repos': [], 'interval_seconds': 10, 'key_file': self.root / 'fake-key',
+        cfg = {'interval_seconds': 10, 'key_file': self.root / 'fake-key',
                'shared': self.shared, 'codex_home': self.codex}
         first, pending, following = Future(), Future(), Future()
         first.set_result('a' * 64)
@@ -1105,7 +1051,7 @@ class NexusSyncTests(unittest.TestCase):
             def submit(self, *_args):
                 return next(sequence)
         cycles = []
-        def supervisor(_cfg, previous, *, include_git, fingerprint_override):
+        def supervisor(_cfg, previous, *, fingerprint_override):
             cycles.append(fingerprint_override)
             notes = ['Снимок отложен: SyncError'] if fingerprint_override == 'a' * 64 else []
             return previous, notes
@@ -1133,13 +1079,13 @@ class NexusSyncTests(unittest.TestCase):
     def test_slow_auto_index_does_not_block_chat_cycles(self):
         started, release = threading.Event(), threading.Event()
         cycles = []
-        cfg = {'git_repos': [], 'interval_seconds': 10, 'key_file': self.root / 'fake-key',
+        cfg = {'interval_seconds': 10, 'key_file': self.root / 'fake-key',
                'shared': self.shared, 'auto_index_preview_dir': self.root / 'preview'}
         def index_work(_cfg):
             started.set()
             self.assertTrue(release.wait(timeout=3))
             return []
-        def chat_work(_cfg, previous, *, include_git):
+        def chat_work(_cfg, previous, ):
             cycles.append(1)
             if len(cycles) == 2:
                 self.assertTrue(started.is_set())
@@ -1162,7 +1108,7 @@ class NexusSyncTests(unittest.TestCase):
         self.assertEqual(len(cycles), 2)
 
     def test_finished_auto_index_error_is_recorded_before_heartbeat(self):
-        cfg = {'git_repos': [], 'interval_seconds': 10, 'key_file': self.root / 'key',
+        cfg = {'interval_seconds': 10, 'key_file': self.root / 'key',
                'shared': self.shared, 'auto_index_preview_dir': self.root / 'preview'}
         class DoneExecutor:
             def __enter__(self):
@@ -1183,7 +1129,7 @@ class NexusSyncTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 ns.run_supervisor(self.root / 'unused.json')
         self.assertTrue(any(note.startswith('Индексация отложена:') for note in heartbeat.call_args.args[2]))
-        self.assertFalse(heartbeat.call_args.args[5])
+        self.assertFalse(heartbeat.call_args.args[3])
 
     def test_signed_heartbeat_reports_stale_and_errors_without_private_notes(self):
         nexus = self.root / 'Nexus'
@@ -1197,21 +1143,20 @@ class NexusSyncTests(unittest.TestCase):
             'state_dir': str(state), 'key_file': str(key)})
         self.assertEqual(ns.configured_status(cfg, self.key)['observer']['state'], 'unknown')
         with mock.patch.object(ns.time, 'time', return_value=1000):
-            ns.write_heartbeat(cfg, self.key, [], False, True, True, fingerprint_running=True)
+            ns.write_heartbeat(cfg, self.key, [], True, fingerprint_running=True)
         with mock.patch.object(ns.time, 'time', return_value=1001):
             observed = ns.configured_status(cfg, self.key)['observer']
             self.assertEqual(observed['state'], 'recent')
-            self.assertTrue(observed['git_running'])
             self.assertTrue(observed['index_running'])
             self.assertTrue(observed['fingerprint_running'])
             status = ns.configured_status(dict(cfg, auto_index_preview_dir=self.root / 'preview'), self.key)
             self.assertEqual(status['index_activity'], 'running')
             self.assertEqual(status['fingerprint_activity'], 'running')
         with mock.patch.object(ns.time, 'time', return_value=1006):
-            ns.write_heartbeat(cfg, self.key, ['Пакет выбранных файлов отложен: FAKE_PRIVATE'], True, False)
+            ns.write_heartbeat(cfg, self.key, ['Снимок отложен: FAKE_PRIVATE'])
             observed = ns.configured_status(cfg, self.key)['observer']
             self.assertEqual(observed['state'], 'error')
-            self.assertEqual(set(observed['errors']), {'secrets', 'git'})
+            self.assertEqual(set(observed['errors']), {'snapshot'})
             self.assertIsNone(observed['index_running'])
             self.assertIsNone(observed['fingerprint_running'])
             status = ns.configured_status(dict(cfg, auto_index_preview_dir=self.root / 'preview'), self.key)
@@ -1225,7 +1170,7 @@ class NexusSyncTests(unittest.TestCase):
         heartbeat.write_text(json.dumps(altered))
         self.assertEqual(ns.configured_status(cfg, self.key)['observer']['state'], 'unverified')
         with self.assertRaises(ns.SyncError):
-            ns.write_heartbeat(cfg, self.key, [], False, False)
+            ns.write_heartbeat(cfg, self.key, [], False)
 
     def test_supervisor_updates_heartbeat_after_failure_and_recovery(self):
         nexus = self.root / 'Nexus'
@@ -1251,59 +1196,7 @@ class NexusSyncTests(unittest.TestCase):
                 ns.run_supervisor(config)
         self.assertEqual(ns.heartbeat_status(cfg, self.key)['state'], 'recent')
 
-    def test_project_report_filters_peers_and_does_not_overwrite_foreign_file(self):
-        nexus = self.root / 'Nexus'
-        project = nexus / 'app'
-        project.mkdir(parents=True)
-        (project / 'package.json').write_text('{}')
-        state = self.root / 'state'
-        state.mkdir()
-        peer_state = self.root / 'peer-state'
-        peer_state.mkdir()
-        self.record_projects(nexus, self.shared, peer_state, 'mac')
-        (project / 'package.json').write_text('{"version":"2"}')
-        self.record_projects(nexus, self.shared, peer_state, 'mac')
-        current = ns.inventory(nexus)
-        report = self.write_project_report(self.shared, state, 'linux', current, include_peers=False)
-        self.assertNotIn('— mac', report.read_text())
-        self.write_project_report(self.shared, state, 'linux', current, include_peers=True)
-        self.assertIn('— mac', report.read_text())
-        peer_event = next((self.shared / 'nexus-sync' / 'project-events' / 'mac').glob('*.nxe'))
-        saved = peer_event.read_bytes()
-        peer_event.write_bytes(b'corrupted')
-        self.write_project_report(self.shared, state, 'linux', current, include_peers=False)
-        with self.assertRaises(ns.SyncError):
-            self.write_project_report(self.shared, state, 'linux', current, include_peers=True)
-        peer_event.write_bytes(saved)
-        report.write_text('Мой собственный файл\n')
-        with self.assertRaises(ns.SyncError):
-            self.write_project_report(self.shared, state, 'linux', current, include_peers=True)
-        self.assertEqual(report.read_text(), 'Мой собственный файл\n')
 
-    def test_dependency_change_reminder_survives_existing_environment(self):
-        nexus = self.root / 'Nexus'
-        project = nexus / 'app'
-        project.mkdir(parents=True)
-        (project / 'package.json').write_text('{}')
-        lock = project / 'package-lock.json'
-        lock.write_text('{"version": 1}')
-        (project / 'node_modules').mkdir()
-        (project / 'node_modules' / 'mock-package').mkdir()
-        (project / 'node_modules' / 'mock-package' / 'package.json').write_text(
-            json.dumps({'name': 'mock-package', 'version': '1.0.0'}))
-        state = self.root / 'state'
-        state.mkdir()
-        self.record_projects(nexus, self.shared, state, 'linux')
-        lock.write_text('{"version": 2}')
-        self.record_projects(nexus, self.shared, state, 'linux')
-        current = ns.inventory(nexus)
-        current['executables'].update({'node': True, 'npm': True})
-        self.assertEqual(ns.project_actions(current), [])
-        report = self.write_project_report(self.shared, state, 'linux', current, include_peers=False)
-        self.assertIn('app: изменён package-lock.json', report.read_text())
-        self.record_projects(nexus, self.shared, state, 'linux')
-        self.write_project_report(self.shared, state, 'linux', current, include_peers=False)
-        self.assertIn('app: изменён package-lock.json', report.read_text())
 
     def test_supervisor_never_trusts_missing_old_snapshot(self):
         nexus = self.root / 'Nexus'
@@ -1431,66 +1324,6 @@ class NexusSyncTests(unittest.TestCase):
             ns.supervisor_once(cfg, None)
         self.assertFalse((self.shared / 'nexus-sync' / 'receipts' / 'mac').exists())
 
-    def test_syncthing_source_config_check_rejects_receiving_and_overlaps(self):
-        nexus = self.root / 'Nexus'
-        nexus.mkdir()
-        config = self.root / 'syncthing.xml'
-        cfg = {'nexus': nexus, 'direction': 'send-only'}
-        document = ns.ET.Element('configuration')
-        folder = ns.ET.SubElement(document, 'folder', {'id': 'projects', 'path': str(nexus), 'type': 'sendonly'})
-        ns.ET.SubElement(folder, 'paused').text = 'false'
-        ns.ET.SubElement(ns.ET.SubElement(document, 'gui'), 'apikey').text = 'SYNTHETIC_PRIVATE_API_KEY'
-        def write():
-            ns.ET.ElementTree(document).write(config, encoding='utf-8', xml_declaration=True)
-        def check():
-            return ns.syncthing_source_config_status(cfg, config, 'projects')
-        write()
-        before = config.read_bytes()
-        result = check()
-        self.assertEqual(result['state'], 'CONFIG_MATCH')
-        self.assertFalse(result['runtime_verified'])
-        self.assertNotIn('SYNTHETIC_PRIVATE_API_KEY', json.dumps(result))
-        self.assertEqual(config.read_bytes(), before)
-        state = self.root / 'state'
-        state.mkdir()
-        key = self.root / 'key'
-        key.write_bytes(self.key)
-        nexus_config = self.root / 'nexus.json'
-        nexus_config.write_text(json.dumps({'format': 'nexus-sync-config-v1', 'machine': 'linux',
-            'nexus': str(nexus), 'codex_home': str(self.codex), 'shared': str(self.shared),
-            'state_dir': str(state), 'key_file': str(key), 'direction': 'send-only'}))
-        output = subprocess.check_output([sys.executable, ns.__file__, 'summary', '--config', str(nexus_config),
-            '--syncthing-config', str(config), '--syncthing-project-folder', 'projects'], text=True)
-        self.assertEqual(json.loads(output)['syncthing_source_config']['state'], 'CONFIG_MATCH')
-        self.assertNotIn('SYNTHETIC_PRIVATE_API_KEY', output)
-        folder.set('type', 'sendreceive')
-        write()
-        self.assertEqual(check()['state'], 'ATTENTION')
-        self.assertFalse(check()['project_folder_send_only'])
-        folder.set('type', 'sendonly')
-        folder.find('paused').text = 'true'
-        write()
-        self.assertTrue(check()['project_folder_paused'])
-        self.assertEqual(check()['state'], 'ATTENTION')
-        folder.find('paused').text = 'false'
-        folder.set('path', str(self.root))
-        write()
-        self.assertFalse(check()['project_path_matches'])
-        self.assertEqual(check()['state'], 'ATTENTION')
-        folder.set('path', str(nexus))
-        overlap = ns.ET.SubElement(document, 'folder', {'id': 'other', 'path': str(nexus / 'project'), 'type': 'sendreceive'})
-        write()
-        self.assertTrue(check()['other_receive_overlap'])
-        self.assertEqual(check()['state'], 'ATTENTION')
-        ns.ET.SubElement(overlap, 'paused').text = 'true'
-        write()
-        self.assertEqual(check()['state'], 'CONFIG_MATCH')
-        self.assertEqual(ns.syncthing_source_config_status(dict(cfg, direction='send-receive'), config, 'projects')['state'], 'ATTENTION')
-        ns.ET.SubElement(document, 'folder', {'id': 'projects', 'path': str(nexus), 'type': 'sendonly'})
-        write()
-        self.assertEqual(check()['state'], 'UNKNOWN')
-        config.write_text('<!DOCTYPE x [<!ENTITY a "x">]><configuration/>')
-        self.assertEqual(check()['state'], 'UNKNOWN')
 
     def test_receiver_prepares_opted_in_snapshots_without_touching_codex(self):
         nexus = self.root / 'MacNexus'
@@ -1750,46 +1583,6 @@ class NexusSyncTests(unittest.TestCase):
             ns.preview_merge(cfg, self.key, 'linux', snapshot.name, self.root / 'tampered-preview')
         self.assertFalse((self.root / 'tampered-preview').exists())
 
-    def test_init_config_accepts_explicit_peers_and_test_secrets(self):
-        nexus = self.root / 'Nexus'
-        nexus.mkdir()
-        secret = nexus / '.env'
-        secret.write_text('FAKE_VALUE=not-for-config')
-        state = self.root / 'state'
-        state.mkdir()
-        key = self.root / 'key'
-        key.write_bytes(self.key)
-        config = self.root / 'receiver.json'
-        script = str(Path(ns.__file__).resolve())
-        base = [sys.executable, script, 'init-config', '--nexus', str(nexus), '--codex-home', str(self.codex),
-                '--shared', str(self.shared), '--state-dir', str(state), '--key-file', str(key), '--machine', 'mac']
-        result = subprocess.run(base + ['--output', str(config), '--direction', 'send-receive',
-            '--peer-root', 'linux', '/linux/Nexus', '--peer-root', 'win', r'D:\Nexus',
-            '--secret-file', str(secret), '--discover-secrets', '--git-repo', str(nexus / 'Bot'), '--discover-git'], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        data = json.loads(config.read_text())
-        self.assertEqual(data['peer_roots'], {'linux': '/linux/Nexus', 'win': r'D:\Nexus'})
-        self.assertEqual(data['secret_files'], [str(secret)])
-        self.assertTrue(data['discover_secrets'])
-        self.assertEqual(data['git_repos'], [str(nexus / 'Bot')])
-        self.assertTrue(data['git_discovery'])
-        self.assertNotIn('not-for-config', result.stdout + result.stderr + config.read_text())
-        self.assertEqual(ns.load_settings(config)['direction'], 'send-receive')
-        discovery = subprocess.run([sys.executable, script, 'discover-secrets', '--config', str(config)],
-                                   capture_output=True, text=True)
-        self.assertEqual(discovery.returncode, 0, discovery.stderr)
-        self.assertEqual(json.loads(discovery.stdout), ['.env'])
-        self.assertNotIn('not-for-config', discovery.stdout + discovery.stderr)
-        duplicate = self.root / 'duplicate.json'
-        result = subprocess.run(base + ['--output', str(duplicate), '--peer-root', 'linux', '/one',
-                                        '--peer-root', 'linux', '/two'], capture_output=True, text=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse(duplicate.exists())
-        default = self.root / 'source.json'
-        result = subprocess.run(base + ['--output', str(default)], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(default.read_text())['direction'], 'send-only')
-        self.assertFalse(json.loads(default.read_text())['git_discovery'])
 
     def test_startup_templates_preserve_paths_and_reject_control_characters(self):
         name, unit = ns.render_startup('linux', 'linux', '/usr/bin/python3', '/tmp/a b/nexus.py', '/tmp/cfg%$x.json')
@@ -1937,773 +1730,33 @@ class NexusSyncTests(unittest.TestCase):
         self.assertEqual(json.loads(records[1])['payload']['text'], 'fake private text')
         self.assertFalse((target_project.parent / '.codex').exists())
 
-    @unittest.skipIf(os.name == 'nt', 'requires names unsupported by Windows')
-    def test_inventory_reports_cross_platform_names_without_reading_file_contents(self):
-        nexus = self.root / 'Nexus'
-        project = nexus / 'project'
-        project.mkdir(parents=True)
-        (project / 'report.txt').write_text('mock private contents')
-        if (project / 'REPORT.txt').exists():
-            self.skipTest('filesystem does not support distinct case-sensitive names')
-        (project / 'REPORT.txt').write_text('different mock contents')
-        (project / 'é.txt').write_text('mock')
-        distinct_unicode = not (project / 'e\u0301.txt').exists()
-        if distinct_unicode:
-            (project / 'e\u0301.txt').write_text('mock')
-        (project / 'con.txt').write_text('mock')
-        (project / 'bad:name').write_text('mock')
-        (project / 'trailing.').mkdir()
-        ignored = project / 'node_modules'
-        ignored.mkdir()
-        (ignored / 'bad:name').write_text('ignored')
-        (project / 'link').symlink_to(project / 'report.txt')
-        current = ns.inventory(nexus)
-        issues = current['portability']
-        self.assertTrue(any(item['kind'] == 'name_collision' and
-                            set(item['paths']) == {'project/report.txt', 'project/REPORT.txt'} for item in issues))
-        if distinct_unicode:
-            self.assertTrue(any(item['kind'] == 'name_collision' and
-                                set(item['paths']) == {'project/é.txt', 'project/e\u0301.txt'} for item in issues))
-        self.assertTrue(any(item['kind'] == 'windows_name' and item['paths'] == ['project/con.txt'] for item in issues))
-        self.assertTrue(any(item['kind'] == 'windows_name' and item['paths'] == ['project/bad:name'] for item in issues))
-        self.assertTrue(any(item['kind'] == 'windows_name' and item['paths'] == ['project/trailing.'] for item in issues))
-        self.assertTrue(any(item['kind'] == 'symlink' and item['paths'] == ['project/link'] for item in issues))
-        self.assertNotIn('node_modules', json.dumps(issues))
-        self.assertNotIn('private contents', json.dumps(current))
-        state = self.root / 'state'
-        state.mkdir()
-        report = self.write_project_report(self.shared, state, 'linux', current, include_peers=False)
-        self.assertIn('Проверить переносимость путей', report.read_text())
-        self.assertIn('project/bad:name', report.read_text())
 
-    def test_python_package_changes_are_observed_without_executing_environment(self):
-        nexus = self.root / 'Nexus'
-        project = nexus / 'project'
-        project.mkdir(parents=True)
-        (project / 'requirements.txt').write_text('example\n')
-        site = project / '.venv' / 'lib' / 'python3.12' / 'site-packages'
-        site.mkdir(parents=True)
-        (site / 'example-1.0.dist-info').mkdir()
-        before = ns.inventory(nexus)
-        state = self.root / 'state'
-        state.mkdir()
-        self.assertEqual(self.record_projects(nexus, self.shared, state, 'linux', current=before), [])
-        (site / 'example-1.0.dist-info').rmdir()
-        (site / 'example-2.0.dist-info').mkdir()
-        (site / 'new_pkg-1.1.dist-info').mkdir()
-        after = ns.inventory(nexus)
-        events = ns.compare(before, after)
-        self.assertTrue(any('Не найден Python-пакет:' in event and 'example-1.0' in event for event in events))
-        self.assertTrue(any('Обнаружен Python-пакет:' in event and 'example-2.0' in event for event in events))
-        self.assertTrue(any('new_pkg-1.1' in event for event in events))
-        self.assertEqual(self.record_projects(nexus, self.shared, state, 'linux', current=after), events)
-        report = self.write_project_report(self.shared, state, 'linux', after, include_peers=False)
-        self.assertIn('new_pkg-1.1', report.read_text())
-        # An unreadable or unsupported layout is not evidence of removals.
-        shutil.rmtree(site)
-        missing = ns.inventory(nexus)
-        self.assertFalse(any('Python-пакет:' in event for event in ns.compare(after, missing)))
-        self.assertEqual(self.record_projects(nexus, self.shared, state, 'linux', current=missing), [])
-        site.mkdir()
-        (site / 'new_pkg-1.1.dist-info').mkdir()
-        recovered = self.record_projects(nexus, self.shared, state, 'linux')
-        self.assertTrue(any('Не найден Python-пакет:' in event and 'example-2.0' in event for event in recovered))
-        windows_site = project / 'venv' / 'Lib' / 'site-packages'
-        windows_site.mkdir(parents=True)
-        (windows_site / 'windows_pkg-1.0.dist-info').mkdir()
-        windows = ns.inventory(nexus)
-        self.assertEqual(windows['projects']['project']['local']['python_packages']
-                         ['venv/Lib/site-packages'], ['windows_pkg-1.0'])
 
-    def test_node_package_changes_are_observed_without_running_npm(self):
-        nexus = self.root / 'Nexus'
-        project = nexus / 'app'
-        modules = project / 'node_modules'
-        package = modules / 'mock-pkg'
-        package.mkdir(parents=True)
-        (project / 'package.json').write_text('{}')
-        def write_metadata(folder, name, version):
-            (folder / 'package.json').write_text(json.dumps({'name': name, 'version': version,
-                                                             'private': 'SYNTHETIC_NOT_FOR_LOGS'}))
-        write_metadata(package, 'mock-pkg', '1.0.0')
-        state = self.root / 'state'
-        state.mkdir()
-        with mock.patch.object(ns.subprocess, 'run', side_effect=AssertionError('npm must not run')):
-            before = ns.inventory(nexus)
-        self.assertEqual(before['projects']['app']['local']['node_packages'], ['mock-pkg@1.0.0'])
-        self.assertEqual(self.record_projects(nexus, self.shared, state, 'linux', current=before), [])
-        write_metadata(package, 'mock-pkg', '2.0.0')
-        scoped = modules / '@demo' / 'other'
-        scoped.mkdir(parents=True)
-        write_metadata(scoped, '@demo/other', '1.2.3')
-        after = ns.inventory(nexus)
-        changes = self.record_projects(nexus, self.shared, state, 'linux', current=after)
-        self.assertIn('Обнаружен Node.js-пакет: app — mock-pkg@2.0.0', changes)
-        self.assertIn('Не найден Node.js-пакет: app — mock-pkg@1.0.0', changes)
-        self.assertIn('Обнаружен Node.js-пакет: app — @demo/other@1.2.3', changes)
-        self.assertNotIn('SYNTHETIC_NOT_FOR_LOGS', json.dumps(after))
-        encrypted = next((self.shared / 'nexus-sync' / 'project-events' / 'linux').glob('*.nxe'))
-        self.assertNotIn(b'mock-pkg', encrypted.read_bytes())
-        (package / 'package.json').write_text('{')
-        unavailable = ns.inventory(nexus)
-        self.assertIsNone(unavailable['projects']['app']['local']['node_packages'])
-        self.assertTrue(any(item['reason'] == 'Состав node_modules не проверен'
-                            for item in ns.project_actions(unavailable)))
-        self.assertEqual(self.record_projects(nexus, self.shared, state, 'linux', current=unavailable), [])
-        write_metadata(package, 'mock-pkg', '3.0.0')
-        recovered = self.record_projects(nexus, self.shared, state, 'linux')
-        self.assertIn('Не найден Node.js-пакет: app — mock-pkg@2.0.0', recovered)
-        self.assertIn('Обнаружен Node.js-пакет: app — mock-pkg@3.0.0', recovered)
 
-    def test_first_package_inventory_reaches_peer_without_claiming_new_install(self):
-        linux, mac = self.root / 'linux', self.root / 'mac'
-        source, target = linux / 'Bot', mac / 'Bot'
-        node = source / 'node_modules' / 'example'
-        site = source / '.venv' / 'lib' / 'python3.12' / 'site-packages'
-        node.mkdir(parents=True)
-        site.mkdir(parents=True)
-        target.mkdir(parents=True)
-        for project in (source, target):
-            (project / 'package.json').write_text('{}')
-            (project / 'requirements.txt').write_text('mock\n')
-        (node / 'package.json').write_text(json.dumps({'name': 'example', 'version': '1.0.0',
-                                                       'private': 'SYNTHETIC_PRIVATE'}))
-        (site / 'python_mock-2.0.dist-info').mkdir()
-        source_state, target_state = self.root / 'linux-state', self.root / 'mac-state'
-        source_state.mkdir()
-        target_state.mkdir()
-        self.assertEqual(self.record_projects(linux, self.shared, source_state, 'linux'), [])
-        events = self.project_log(self.shared)
-        self.assertEqual(len(events), 1)
-        self.assertIn('Начально наблюдался Node.js-пакет: Bot — example@1.0.0', events[0]['changes'])
-        self.assertIn('Начально наблюдался Python-пакет: Bot (.venv/lib/python3.12/site-packages) — python_mock-2.0', events[0]['changes'])
-        encoded = next((self.shared / 'nexus-sync' / 'project-events' / 'linux').glob('*.nxe')).read_bytes()
-        self.assertNotIn(b'example', encoded)
-        self.assertNotIn('SYNTHETIC_PRIVATE', json.dumps(events))
-        self.assertEqual(self.record_projects(linux, self.shared, source_state, 'linux'), [])
-        self.assertEqual(len(self.project_log(self.shared)), 1)
-        report = self.write_project_report(self.shared, target_state, 'mac', ns.inventory(mac), include_peers=True)
-        self.assertIn('example@1.0.0 — отмечен на linux; локальный node_modules отсутствует', report.read_text())
-        self.assertIn('python_mock-2.0 — отмечен на linux; локальное Python-окружение отсутствует', report.read_text())
 
-    def test_old_package_baseline_migrates_once_without_erasing_event_history(self):
-        linux, mac = self.root / 'linux', self.root / 'mac'
-        source, target = linux / 'Bot', mac / 'Bot'
-        package = source / 'node_modules' / 'example'
-        package.mkdir(parents=True)
-        target.mkdir(parents=True)
-        for project in (source, target):
-            (project / 'package.json').write_text('{}')
-        metadata = package / 'package.json'
-        metadata.write_text(json.dumps({'name': 'example', 'version': '1.0.0'}))
-        source_state, target_state = self.root / 'linux-state', self.root / 'mac-state'
-        source_state.mkdir()
-        target_state.mkdir()
-        self.record_projects(linux, self.shared, source_state, 'linux')
-        baseline = source_state / 'projects-linux.json'
-        old = json.loads(baseline.read_text())
-        old.pop('package_baseline_version')
-        baseline.write_text(json.dumps(old))
-        metadata.write_text(json.dumps({'name': 'example', 'version': '2.0.0'}))
-        self.record_projects(linux, self.shared, source_state, 'linux')
-        events = self.project_log(self.shared)
-        self.assertEqual(len(events), 2)
-        self.assertIn('Обновлён исходный список Node.js: Bot', events[-1]['changes'])
-        self.assertIn('Начально наблюдался Node.js-пакет: Bot — example@2.0.0', events[-1]['changes'])
-        self.assertEqual(json.loads(baseline.read_text())['package_baseline_version'], 1)
-        self.assertEqual(self.record_projects(linux, self.shared, source_state, 'linux'), [])
-        self.assertEqual(len(self.project_log(self.shared)), 2)
-        report = self.write_project_report(self.shared, target_state, 'mac', ns.inventory(mac), include_peers=True)
-        section = report.read_text().split('## Пакеты с других устройств для проверки', 1)[1].split('## Журнал наблюдений', 1)[0]
-        self.assertIn('example@2.0.0', section)
-        self.assertNotIn('example@1.0.0', section)
 
-    def test_old_baseline_migration_waits_for_unavailable_package_scan(self):
-        nexus = self.root / 'Nexus'
-        project = nexus / 'Bot'
-        package = project / 'node_modules' / 'example'
-        package.mkdir(parents=True)
-        (project / 'package.json').write_text('{}')
-        metadata = package / 'package.json'
-        metadata.write_text(json.dumps({'name': 'example', 'version': '1.0.0'}))
-        state = self.root / 'state'
-        state.mkdir()
-        self.record_projects(nexus, self.shared, state, 'linux')
-        baseline = state / 'projects-linux.json'
-        old = json.loads(baseline.read_text())
-        old.pop('package_baseline_version')
-        old.pop('package_baseline_pending')
-        baseline.write_text(json.dumps(old))
-        metadata.write_text('{')
-        self.assertEqual(self.record_projects(nexus, self.shared, state, 'linux'), [])
-        self.assertEqual(json.loads(baseline.read_text())['package_baseline_pending']['node'], ['Bot'])
-        self.assertEqual(len(self.project_log(self.shared)), 1)
-        metadata.write_text(json.dumps({'name': 'example', 'version': '1.0.0'}))
-        self.assertEqual(self.record_projects(nexus, self.shared, state, 'linux'), [])
-        events = self.project_log(self.shared)
-        self.assertEqual(len(events), 2)
-        self.assertIn('Обновлён исходный список Node.js: Bot', events[-1]['changes'])
-        self.assertIn('Начально наблюдался Node.js-пакет: Bot — example@1.0.0', events[-1]['changes'])
-        self.assertEqual(json.loads(baseline.read_text())['package_baseline_pending']['node'], [])
-        self.assertEqual(self.record_projects(nexus, self.shared, state, 'linux'), [])
-        self.assertEqual(len(self.project_log(self.shared)), 2)
 
-    def test_old_python_baseline_waits_for_unavailable_site(self):
-        nexus = self.root / 'Nexus'
-        project = nexus / 'Bot'
-        site = project / '.venv' / 'lib' / 'python3.12' / 'site-packages'
-        site.mkdir(parents=True)
-        (project / 'requirements.txt').write_text('mock\n')
-        (site / 'example-1.0.dist-info').mkdir()
-        state = self.root / 'state'
-        state.mkdir()
-        self.record_projects(nexus, self.shared, state, 'linux')
-        baseline = state / 'projects-linux.json'
-        old = json.loads(baseline.read_text())
-        old.pop('package_baseline_version')
-        old.pop('package_baseline_pending')
-        baseline.write_text(json.dumps(old))
-        shutil.rmtree(site)
-        self.assertEqual(self.record_projects(nexus, self.shared, state, 'linux'), [])
-        self.assertEqual(json.loads(baseline.read_text())['package_baseline_pending']['python'],
-                         [['Bot', '.venv/lib/python3.12/site-packages']])
-        (site / 'example-1.0.dist-info').mkdir(parents=True)
-        self.assertEqual(self.record_projects(nexus, self.shared, state, 'linux'), [])
-        self.assertIn('Обновлён исходный список Python: Bot (.venv/lib/python3.12/site-packages)',
-                      self.project_log(self.shared)[-1]['changes'])
-        self.assertEqual(json.loads(baseline.read_text())['package_baseline_pending']['python'], [])
 
-    def test_report_compares_peer_node_events_with_local_inventory(self):
-        linux, mac = self.root / 'linux', self.root / 'mac'
-        source, target = linux / 'Bot', mac / 'Bot'
-        source_modules = source / 'node_modules'
-        source_modules.mkdir(parents=True)
-        target.mkdir(parents=True)
-        for project in (source, target):
-            (project / 'package.json').write_text('{}')
-        linux_state, mac_state = self.root / 'linux-state', self.root / 'mac-state'
-        linux_state.mkdir()
-        mac_state.mkdir()
-        self.assertEqual(self.record_projects(linux, self.shared, linux_state, 'linux'), [])
-        package = source_modules / 'example'
-        package.mkdir()
-        (package / 'package.json').write_text(json.dumps({'name': 'example', 'version': '1.0.0'}))
-        self.record_projects(linux, self.shared, linux_state, 'linux')
-        report = self.write_project_report(self.shared, mac_state, 'mac', ns.inventory(mac), include_peers=True)
-        self.assertIn('example@1.0.0 — отмечен на linux; локальный node_modules отсутствует', report.read_text())
-        local_package = target / 'node_modules' / 'example'
-        local_package.mkdir(parents=True)
-        (local_package / 'package.json').write_text(json.dumps({'name': 'example', 'version': '1.0.0'}))
-        self.write_project_report(self.shared, mac_state, 'mac', ns.inventory(mac), include_peers=True)
-        self.assertNotIn('## Пакеты с других устройств для проверки', report.read_text())
-        (local_package / 'package.json').write_text('{')
-        self.write_project_report(self.shared, mac_state, 'mac', ns.inventory(mac), include_peers=True)
-        self.assertIn('Состав node_modules не проверен', report.read_text())
-        self.assertIn('example@1.0.0 — отмечен на linux; локальный состав не проверен', report.read_text())
-        shutil.rmtree(package)
-        self.record_projects(linux, self.shared, linux_state, 'linux')
-        self.write_project_report(self.shared, mac_state, 'mac', ns.inventory(mac), include_peers=True)
-        self.assertNotIn('## Пакеты с других устройств для проверки', report.read_text())
 
-    def test_report_compares_peer_python_events_across_environment_layouts(self):
-        linux, mac = self.root / 'linux', self.root / 'mac'
-        source, target = linux / 'Bot', mac / 'Bot'
-        site = source / '.venv' / 'lib' / 'python3.12' / 'site-packages'
-        site.mkdir(parents=True)
-        target.mkdir(parents=True)
-        for project in (source, target):
-            (project / 'requirements.txt').write_text('example\n')
-        linux_state, mac_state = self.root / 'linux-state', self.root / 'mac-state'
-        linux_state.mkdir()
-        mac_state.mkdir()
-        self.assertEqual(self.record_projects(linux, self.shared, linux_state, 'linux'), [])
-        (site / 'example-1.0.dist-info').mkdir()
-        second_site = source / 'venv' / 'Lib' / 'site-packages'
-        second_site.mkdir(parents=True)
-        # A newly discovered site is baseline-only; record a subsequent addition.
-        self.record_projects(linux, self.shared, linux_state, 'linux')
-        (second_site / 'example-1.0.dist-info').mkdir()
-        self.record_projects(linux, self.shared, linux_state, 'linux')
-        report = self.write_project_report(self.shared, mac_state, 'mac', ns.inventory(mac), include_peers=True)
-        self.assertIn('example-1.0 — отмечен на linux; локальное Python-окружение отсутствует', report.read_text())
-        local_site = target / 'venv' / 'Lib' / 'site-packages'
-        local_site.mkdir(parents=True)
-        (local_site / 'example-1.0.dist-info').mkdir()
-        self.write_project_report(self.shared, mac_state, 'mac', ns.inventory(mac), include_peers=True)
-        self.assertNotIn('## Пакеты с других устройств для проверки', report.read_text())
-        shutil.rmtree(local_site)
-        self.write_project_report(self.shared, mac_state, 'mac', ns.inventory(mac), include_peers=True)
-        self.assertIn('example-1.0 — отмечен на linux; локальный состав не проверен', report.read_text())
-        (site / 'example-1.0.dist-info').rmdir()
-        self.record_projects(linux, self.shared, linux_state, 'linux')
-        self.write_project_report(self.shared, mac_state, 'mac', ns.inventory(mac), include_peers=True)
-        self.assertIn('example-1.0 — отмечен на linux; локальный состав не проверен', report.read_text())
-        (second_site / 'example-1.0.dist-info').rmdir()
-        self.record_projects(linux, self.shared, linux_state, 'linux')
-        self.write_project_report(self.shared, mac_state, 'mac', ns.inventory(mac), include_peers=True)
-        self.assertNotIn('## Пакеты с других устройств для проверки', report.read_text())
 
-    @unittest.skipIf(os.name == 'nt', 'requires symlink privileges')
-    def test_node_pnpm_links_are_observed_without_following_external_links(self):
-        nexus = self.root / 'Nexus'
-        project = nexus / 'app'
-        modules = project / 'node_modules'
-        store = modules / '.pnpm'
-        real = store / 'mock-pkg@1.0.0' / 'node_modules' / 'mock-pkg'
-        real.mkdir(parents=True)
-        (project / 'package.json').write_text('{}')
-        (real / 'package.json').write_text(json.dumps({'name': 'mock-pkg', 'version': '1.0.0'}))
-        (modules / 'mock-pkg').symlink_to(os.path.relpath(real, modules), target_is_directory=True)
-        scoped = store / '@demo+other@1.2.3' / 'node_modules' / '@demo' / 'other'
-        scoped.mkdir(parents=True)
-        (scoped / 'package.json').write_text(json.dumps({'name': '@demo/other', 'version': '1.2.3'}))
-        (modules / '@demo').mkdir()
-        (modules / '@demo' / 'other').symlink_to(os.path.relpath(scoped, modules / '@demo'), target_is_directory=True)
-        before = ns.inventory(nexus)
-        self.assertEqual(before['projects']['app']['local']['node_packages'], ['@demo/other@1.2.3', 'mock-pkg@1.0.0'])
-        updated = store / 'mock-pkg@2.0.0' / 'node_modules' / 'mock-pkg'
-        updated.mkdir(parents=True)
-        (updated / 'package.json').write_text(json.dumps({'name': 'mock-pkg', 'version': '2.0.0'}))
-        (modules / 'mock-pkg').unlink()
-        (modules / 'mock-pkg').symlink_to(os.path.relpath(updated, modules), target_is_directory=True)
-        after = ns.inventory(nexus)
-        self.assertIn('Обнаружен Node.js-пакет: app — mock-pkg@2.0.0', ns.compare(before, after))
-        self.assertIn('Не найден Node.js-пакет: app — mock-pkg@1.0.0', ns.compare(before, after))
-        outside = self.root / 'outside'
-        outside.mkdir()
-        (outside / 'package.json').write_text(json.dumps({'name': 'external', 'version': '1.0.0'}))
-        (modules / 'external').symlink_to(outside, target_is_directory=True)
-        unavailable = ns.inventory(nexus)
-        self.assertIsNone(unavailable['projects']['app']['local']['node_packages'])
-        self.assertFalse(any('Node.js-пакет:' in row for row in ns.compare(before, unavailable)))
-        (modules / 'external').unlink()
-        (modules / 'broken').symlink_to(store / 'missing', target_is_directory=True)
-        self.assertIsNone(ns.inventory(nexus)['projects']['app']['local']['node_packages'])
 
-    def test_project_baseline_and_dependency_change(self):
-        project = self.root / 'Nexus' / 'app'
-        project.mkdir(parents=True)
-        (project / 'requirements.txt').write_text('a==1\n')
-        (project / '.venv').mkdir()
-        (project / '.venv' / 'package.json').write_text('{}')
-        first = ns.inventory(project.parent)
-        self.assertEqual(set(first['projects']), {'app'})
-        self.assertEqual(ns.project_actions(first), [])
-        (project / 'requirements.txt').write_text('a==2\n')
-        self.assertEqual(ns.compare(first, ns.inventory(project.parent)), ['Изменён манифест: app/requirements.txt'])
 
-    def test_report_distinguishes_added_and_removed_lock_files(self):
-        nexus = self.root / 'Nexus'
-        nexus.mkdir()
-        (nexus / 'package.json').write_text('{}')
-        (nexus / 'node_modules').mkdir()
-        state = self.root / 'state'
-        state.mkdir()
-        self.assertEqual(self.record_projects(nexus, self.shared, state, 'linux'), [])
-        lock = nexus / 'package-lock.json'
-        lock.write_text('{}')
-        self.assertEqual(self.record_projects(nexus, self.shared, state, 'linux'),
-                         ['Добавлен манифест: ./package-lock.json'])
-        lock.unlink()
-        self.assertEqual(self.record_projects(nexus, self.shared, state, 'linux'),
-                         ['Удалён манифест: ./package-lock.json'])
-        report = self.write_project_report(self.shared, state, 'linux', ns.inventory(nexus), include_peers=False)
-        self.assertIn('.: добавлен package-lock.json', report.read_text())
-        self.assertIn('.: удалён package-lock.json', report.read_text())
 
-    def test_rust_target_is_reported_only_for_a_cargo_project(self):
-        nexus = self.root / 'Nexus'
-        rust, other = nexus / 'rust-app', nexus / 'other'
-        rust.mkdir(parents=True)
-        (other / 'target').mkdir(parents=True)
-        (rust / 'Cargo.toml').write_text('[package]\nname = "mock"\nversion = "0.1.0"\n')
-        (other / 'requirements.txt').write_text('synthetic==1\n')
-        before = ns.inventory(nexus)
-        state = self.root / 'state-rust'
-        state.mkdir()
-        self.assertEqual(self.record_projects(nexus, self.shared, state, 'linux'), [])
-        (rust / 'target').mkdir()
-        (rust / 'target' / 'mock-artifact').write_text('synthetic')
-        after = ns.inventory(nexus)
-        self.assertIn('Локальное Rust target: rust-app — обнаружено', ns.compare(before, after))
-        self.assertIn('Локальное Rust target: rust-app — обнаружено',
-                      self.record_projects(nexus, self.shared, state, 'linux'))
-        self.assertIn('Локальное Rust target: rust-app — обнаружено', self.project_log(self.shared)[-1]['changes'])
-        report = self.write_project_report(self.shared, state, 'linux', after, include_peers=False).read_text()
-        self.assertIn('rust-app', report)
-        self.assertIn('Rust target', report)
-        self.assertNotIn('other/target', report)
-        self.assertTrue((other / 'target').is_dir())
 
-    @unittest.skipIf(os.name == 'nt', 'requires symlink privileges')
-    def test_rust_target_symlink_does_not_claim_artifacts_removed(self):
-        nexus = self.root / 'Nexus'
-        project = nexus / 'rust-app'
-        (project / 'target').mkdir(parents=True)
-        (project / 'Cargo.toml').write_text('[package]\nname = "mock"\nversion = "0.1.0"\n')
-        before = ns.inventory(nexus)
-        (project / 'target').rmdir()
-        (project / 'target').symlink_to(self.root / 'unavailable')
-        after = ns.inventory(nexus)
-        self.assertFalse(any('Rust target' in change for change in ns.compare(before, after)))
-        self.assertTrue(any(action['reason'] == 'Rust target является ссылкой' for action in ns.project_actions(after)))
 
-    def test_inventory_finds_projects_in_generic_build_named_directories(self):
-        nexus = self.root / 'Nexus'
-        for name in ('build', 'dist', 'target'):
-            folder = nexus / name / 'project'
-            folder.mkdir(parents=True)
-            (folder / 'requirements.txt').write_text('example==1\n')
-        self.assertEqual(set(ns.inventory(nexus)['projects']), {
-            'build/project', 'dist/project', 'target/project'})
 
-    def test_detects_python_and_node_package_managers_conservatively(self):
-        nexus = self.root / 'Nexus'
-        python = nexus / 'python-app'
-        node = nexus / 'node-app'
-        python.mkdir(parents=True)
-        node.mkdir()
-        (python / 'Pipfile').write_text('[packages]\n')
-        (python / 'poetry.lock').write_text('mock lock\n')
-        (node / 'package.json').write_text('{}')
-        (node / 'package-lock.json').write_text('{}')
-        (node / 'bun.lock').write_text('mock lock')
-        before = ns.inventory(nexus)
-        self.assertIn('poetry.lock', before['projects']['python-app']['files'])
-        actions = {action['project']: action for action in ns.project_actions(before)}
-        self.assertIn('Python-окружение', actions['python-app']['reason'])
-        self.assertIsNone(actions['node-app']['command'])
-        (python / 'poetry.lock').write_text('updated lock\n')
-        self.assertIn('Изменён манифест: python-app/poetry.lock', ns.compare(before, ns.inventory(nexus)))
-        (node / 'bun.lock').unlink()
-        current = ns.inventory(nexus)
-        current['executables'].update({'node': True, 'npm': True})
-        actions = {action['project']: action for action in ns.project_actions(current)}
-        self.assertEqual(actions['node-app']['command'], 'npm ci')
 
-    def test_project_report_detects_missing_toolchains_without_running_them(self):
-        nexus = self.root / 'Nexus'
-        project = nexus / 'app'
-        project.mkdir(parents=True)
-        (project / 'requirements.txt').write_text('mock==1\n')
-        (project / 'package.json').write_text('{}')
-        (project / 'pom.xml').write_text('<project/>')
-        (project / '.venv').mkdir()
-        (project / 'node_modules').mkdir()
-        def lookup(installed):
-            return lambda command: '/mock/bin/' + command if command in installed else None
-        with mock.patch.object(ns.shutil, 'which', side_effect=lookup({'python3'})), \
-             mock.patch.object(ns.subprocess, 'run', side_effect=AssertionError('tool must not be run')):
-            first = ns.inventory(nexus)
-            actions = ns.project_actions(first)
-        self.assertEqual(first['toolchains'], {'Python': True, 'Node.js': False, 'Java/JDK': False})
-        self.assertTrue(any('Node.js не найден в PATH' in action['reason'] for action in actions))
-        self.assertTrue(any('Java/JDK не найден в PATH' in action['reason'] for action in actions))
-        with mock.patch.object(ns.shutil, 'which', side_effect=lookup({'python3', 'node', 'javac'})):
-            second = ns.inventory(nexus)
-        self.assertEqual(ns.compare(first, second), ['Инструмент Java/JDK: найден в PATH', 'Инструмент Node.js: найден в PATH'])
-        old_format = dict(first)
-        old_format.pop('toolchains')
-        self.assertEqual(ns.compare(old_format, second), [])
-        state = self.root / 'state'
-        state.mkdir()
-        self.assertEqual(self.record_projects(nexus, self.shared, state, 'linux', current=first), [])
-        self.assertEqual(self.record_projects(nexus, self.shared, state, 'linux', current=second),
-                         ['Инструмент Java/JDK: найден в PATH', 'Инструмент Node.js: найден в PATH'])
-        self.assertNotIn('/mock/bin', json.dumps(self.project_log(self.shared), ensure_ascii=False))
 
-    def test_env_example_is_reported_without_reading_contents(self):
-        project = self.root / 'Nexus' / 'app'
-        project.mkdir(parents=True)
-        (project / 'requirements.txt').write_text('example==1\n')
-        before = ns.inventory(project.parent)
-        example = project / '.env.example'
-        example.write_text('FAKE_TOKEN=should-not-enter-report\n')
-        with mock.patch.object(ns, '_digest', wraps=ns._digest) as digest:
-            after = ns.inventory(project.parent)
-        self.assertNotIn(example, [call.args[0] for call in digest.call_args_list])
-        self.assertIn('Образец .env: app — обнаружен', ns.compare(before, after))
-        actions = ns.project_actions(after)
-        self.assertTrue(any('Образец .env' in action['reason'] for action in actions))
-        self.assertNotIn('should-not-enter-report', json.dumps(actions, ensure_ascii=False))
 
-    def test_uppercase_env_template_is_reported_without_reading_contents(self):
-        project = self.root / 'Nexus' / 'app'
-        project.mkdir(parents=True)
-        (project / 'requirements.txt').write_text('example==1\n')
-        before = ns.inventory(project.parent)
-        example = project / '.ENV.EXAMPLE'
-        example.write_text('FAKE_TOKEN=not-in-report\n')
-        with mock.patch.object(ns, '_digest', wraps=ns._digest) as digest:
-            after = ns.inventory(project.parent)
-        self.assertNotIn(example, [call.args[0] for call in digest.call_args_list])
-        self.assertIn('Образец .env: app — обнаружен', ns.compare(before, after))
-        self.assertTrue(any('Образец .env' in action['reason'] for action in ns.project_actions(after)))
-        self.assertNotIn('not-in-report', json.dumps(after, ensure_ascii=False))
 
-    def test_example_ignore_warnings_do_not_assume_excluded_directories_are_disposable(self):
-        nexus = self.root / 'Nexus'
-        project = nexus / 'Bot'
-        project.mkdir(parents=True)
-        (project / 'requirements.txt').write_text('mock==1\n')
-        (project / '.venv').mkdir()
-        (project / '.git').mkdir()
-        (project / 'node_modules').mkdir()
-        misleading = nexus / 'venv'
-        misleading.mkdir()
-        (misleading / 'requirements.txt').write_text('MOCK_PRIVATE_CONTENT=not-for-report\n')
-        inventory = ns.inventory(nexus)
-        candidates = {item['path']: item for item in inventory['sample_exclusions']}
-        self.assertEqual(set(candidates), {'Bot/.venv', 'Bot/.git', 'Bot/node_modules', 'venv'})
-        self.assertTrue(candidates['venv']['project_marker'])
-        self.assertEqual(candidates['Bot/.git']['kind'], 'git')
-        self.assertNotIn('venv', inventory['projects'])
-        self.assertNotIn('MOCK_PRIVATE_CONTENT', json.dumps(inventory, ensure_ascii=False))
-        sample = set(Path(ns.__file__).with_name('stignore.example').read_text().splitlines())
-        for item in candidates:
-            self.assertIn(Path(item).name, sample)
-        state = self.root / 'state'
-        state.mkdir()
-        report = ns.write_project_report(self.shared, state, 'linux', inventory, key=self.key, include_peers=False)
-        text = report.read_text()
-        self.assertIn('действующие правила Syncthing не проверены', text)
-        self.assertIn('"venv": есть признак проекта', text)
-        self.assertIn('"Bot/.venv": локальное окружение или данные', text)
-        self.assertIn('"Bot/.git": Git исключён образцом', text)
-        self.assertNotIn('MOCK_PRIVATE_CONTENT', text)
 
-    def test_logs_local_environment_presence_without_claiming_package_contents(self):
-        project = self.root / 'Nexus' / 'app'
-        project.mkdir(parents=True)
-        (project / 'pyproject.toml').write_text('[project]\nname = "example"\n')
-        first = ns.inventory(project.parent)
-        self.assertEqual(len(ns.project_actions(first)), 1)
-        (project / '.venv').mkdir()
-        second = ns.inventory(project.parent)
-        self.assertEqual(ns.compare(first, second), ['Локальное Python-окружение: app — обнаружено'])
-        self.assertEqual(ns.compare(second, first), ['Локальное Python-окружение: app — не найдено'])
-        self.assertEqual(ns.project_actions(second)[0]['reason'], 'Каталог Python-окружения пуст')
-        state = self.root / 'state'
-        state.mkdir()
-        self.assertEqual(self.record_projects(project.parent, self.shared, state, 'linux'), [])
-        (project / '.venv').rmdir()
-        self.assertEqual(self.record_projects(project.parent, self.shared, state, 'linux'),
-                         ['Локальное Python-окружение: app — не найдено'])
-        self.assertEqual(self.project_log(self.shared)[0]['changes'],
-                         ['Локальное Python-окружение: app — не найдено'])
 
-    def test_python_restore_suggestions_follow_platform_and_declared_manager(self):
-        project = self.root / 'Nexus' / 'app'
-        project.mkdir(parents=True)
-        (project / 'requirements.txt').write_text('synthetic-package==1\n')
-        current = ns.inventory(project.parent)
-        current['executables'].update({'python3': True, 'py': True})
-        linux = ns.project_actions(current, platform='linux')[0]
-        windows = ns.project_actions(current, platform='win32')[0]
-        mac = ns.project_actions(current, platform='darwin')[0]
-        self.assertEqual(linux['steps'], ['python3 -m venv .venv',
-                                          '.venv/bin/python -m pip install -r requirements.txt'])
-        self.assertEqual(mac['steps'], linux['steps'])
-        self.assertEqual(windows['steps'], ['py -3 -m venv .venv',
-                                           r'.venv\Scripts\python.exe -m pip install -r requirements.txt'])
-        self.assertEqual(ns.project_actions(current, platform='unknown')[0]['steps'], [])
-        (project / 'poetry.lock').write_text('synthetic lock\n')
-        self.assertEqual(ns.project_actions(ns.inventory(project.parent), platform='linux')[0]['steps'], [])
-        self.assertFalse((project / '.venv').exists())
 
-    def test_project_report_uses_target_platform_for_restore_suggestions(self):
-        project = self.root / 'Nexus' / 'app'
-        project.mkdir(parents=True)
-        (project / 'requirements.txt').write_text('synthetic-package==1\n')
-        current = ns.inventory(project.parent)
-        current['executables'].update({'python3': True, 'py': True})
-        state = self.root / 'state'
-        state.mkdir()
-        report = self.write_project_report(self.shared, state, 'windows', current,
-                                           include_peers=False, platform='win32')
-        content = report.read_text(encoding='utf-8')
-        self.assertIn('py -3 -m venv .venv', content)
-        self.assertIn(r'.venv\Scripts\python.exe -m pip install -r requirements.txt', content)
-        self.assertNotIn('.venv/bin/python', content)
 
-    def test_restore_suggestions_require_corresponding_executable(self):
-        nexus = self.root / 'Nexus'
-        project = nexus / 'app'
-        project.mkdir(parents=True)
-        (project / 'requirements.txt').write_text('mock==1\n')
-        (project / 'package.json').write_text('{}')
-        (project / 'package-lock.json').write_text('{}')
-        def lookup(installed):
-            return lambda name: '/mock/bin/' + name if name in installed else None
-        with mock.patch.object(ns.shutil, 'which', side_effect=lookup({'node'})):
-            current = ns.inventory(nexus)
-        previous = current
-        actions = ns.project_actions(current, platform='linux')
-        python = next(action for action in actions if 'Python-окружение' in action['reason'])
-        node = next(action for action in actions if action['reason'] == 'node_modules не найден')
-        self.assertEqual(python['steps'], [])
-        self.assertIsNone(node['command'])
-        state = self.root / 'report-state'
-        state.mkdir()
-        self.assertEqual(self.record_projects(nexus, self.shared, state, 'linux', current=previous), [])
-        report = self.write_project_report(self.shared, state, 'linux', current, include_peers=False).read_text()
-        self.assertNotIn('`npm ci`', report)
-        self.assertNotIn('`python3 -m venv', report)
-        self.assertIn('Python не найден в PATH', report)
-        self.assertIn('npm не найден в PATH', report)
-        with mock.patch.object(ns.shutil, 'which', side_effect=lookup({'python3', 'node', 'npm'})):
-            current = ns.inventory(nexus)
-        self.assertIn('Команда npm: найдена в PATH', ns.compare(previous, current))
-        self.assertIn('Команда python3: найдена в PATH', ns.compare(previous, current))
-        changes = self.record_projects(nexus, self.shared, state, 'linux', current=current)
-        self.assertIn('Команда npm: найдена в PATH', changes)
-        events = self.project_log(self.shared)
-        self.assertTrue(any('Команда npm: найдена в PATH' in event['changes'] for event in events))
-        self.assertNotIn('/mock/bin', json.dumps(events))
-        actions = ns.project_actions(current, platform='linux')
-        self.assertTrue(next(action for action in actions if 'Python-окружение' in action['reason'])['steps'])
-        self.assertEqual(next(action for action in actions if action['reason'] == 'node_modules не найден')['command'], 'npm ci')
 
-    def test_python_wheel_platform_observations_follow_encrypted_changes(self):
-        source = self.root / 'source' / 'app'
-        target = self.root / 'target' / 'app'
-        wheel = source / '.venv' / 'lib' / 'python3.12' / 'site-packages' / 'mock_native-1.0.dist-info' / 'WHEEL'
-        wheel.parent.mkdir(parents=True)
-        target.mkdir(parents=True)
-        for project in (source, target):
-            (project / 'requirements.txt').write_text('mock-native==1.0\n')
-        wheel.write_text('Wheel-Version: 1.0\nTag: cp312-cp312-manylinux_2_17_x86_64\n')
-        source_state, target_state = self.root / 'source-state', self.root / 'target-state'
-        source_state.mkdir()
-        target_state.mkdir()
-        self.record_projects(source.parent, self.shared, source_state, 'linux')
-        event = next((self.shared / 'nexus-sync' / 'project-events' / 'linux').glob('*.nxe'))
-        self.assertNotIn(b'manylinux', event.read_bytes())
-        report = self.write_project_report(self.shared, target_state, 'windows', ns.inventory(target.parent),
-                                           include_peers=True, platform='win32')
-        line = next(row for row in report.read_text().splitlines() if 'mock_native-1.0 — отмечен' in row)
-        self.assertIn('manylinux_2_17_x86_64', line)
-        self.assertIn('сборка для другой ОС', line)
-        wheel.write_text('Wheel-Version: 1.0\nTag: py3-none-any\n')
-        self.record_projects(source.parent, self.shared, source_state, 'linux')
-        self.write_project_report(self.shared, target_state, 'windows', ns.inventory(target.parent),
-                                  include_peers=True, platform='win32')
-        line = next(row for row in report.read_text().splitlines() if 'mock_native-1.0 — отмечен' in row)
-        self.assertIn('py3-none-any', line)
-        self.assertNotIn('сборка для другой ОС', line)
-        wheel.write_text('Wheel-Version: 1.0\nGenerator: SYNTHETIC_PRIVATE\n'
-                         'Tag: cp312-cp312-manylinux_2_17_x86_64\nTag: cp312-cp312-win_amd64\n')
-        self.record_projects(source.parent, self.shared, source_state, 'linux')
-        self.write_project_report(self.shared, target_state, 'windows', ns.inventory(target.parent),
-                                  include_peers=True, platform='win32')
-        line = next(row for row in report.read_text().splitlines() if 'mock_native-1.0 — отмечен' in row)
-        self.assertIn('win_amd64', line)
-        self.assertNotIn('сборка для другой ОС', line)
-        self.assertNotIn('SYNTHETIC_PRIVATE', json.dumps(self.project_log(self.shared)))
-        wheel.write_text('Wheel-Version: 1.0\nTag: cp312-cp312-manylinux_2_17_x86_64.win_amd64\n')
-        self.record_projects(source.parent, self.shared, source_state, 'linux')
-        self.write_project_report(self.shared, target_state, 'windows', ns.inventory(target.parent),
-                                  include_peers=True, platform='win32')
-        line = next(row for row in report.read_text().splitlines() if 'mock_native-1.0 — отмечен' in row)
-        self.assertNotIn('сборка для другой ОС', line)
-        wheel.unlink()
-        self.record_projects(source.parent, self.shared, source_state, 'linux')
-        self.write_project_report(self.shared, target_state, 'windows', ns.inventory(target.parent),
-                                  include_peers=True, platform='win32')
-        line = next(row for row in report.read_text().splitlines() if 'mock_native-1.0 — отмечен' in row)
-        self.assertNotIn('wheel:', line)
-        self.assertNotIn('сборка для другой ОС', line)
 
-    def test_node_platform_restrictions_follow_encrypted_observations(self):
-        source = self.root / 'source' / 'app'
-        source.mkdir(parents=True)
-        (source / 'package.json').write_text('{"name":"app"}')
-        package = source / 'node_modules' / 'mock-native'
-        package.mkdir(parents=True)
-        metadata = package / 'package.json'
-        metadata.write_text(json.dumps({'name': 'mock-native', 'version': '1.0.0',
-                                        'os': ['linux'], 'cpu': ['x64']}))
-        mixed = source / 'node_modules' / 'mock-mixed'
-        mixed.mkdir()
-        (mixed / 'package.json').write_text(json.dumps({'name': 'mock-mixed', 'version': '1.0.0',
-                                                       'os': ['linux', '!win32']}))
-        source_state = self.root / 'source-state'
-        target_state = self.root / 'target-state'
-        source_state.mkdir()
-        target_state.mkdir()
-        target = self.root / 'target' / 'app'
-        target.mkdir(parents=True)
-        (target / 'package.json').write_text('{"name":"app"}')
-        key = b'v' * 32
-        ns.record_projects(source.parent, self.shared, source_state, 'linux', key=key)
-        events = ns.project_log(self.shared, key)
-        self.assertTrue(any('Ограничения Node.js-пакета' in item and 'mock-native' in item
-                            for event in events for item in event['changes']))
-        event_path = next((self.shared / 'nexus-sync' / 'project-events' / 'linux').glob('*.nxe'))
-        self.assertNotIn(b'mock-native', event_path.read_bytes())
-        report = ns.write_project_report(self.shared, target_state, 'windows', ns.inventory(target.parent),
-                                         key=key, include_peers=True, platform='win32')
-        lines = report.read_text().splitlines()
-        native = next(line for line in lines if 'mock-native@1.0.0 — отмечен' in line)
-        self.assertIn('OS в метаданных: linux', native)
-        self.assertIn('CPU в метаданных: x64', native)
-        self.assertIn('может исключать текущую ОС', native)
-        mixed_line = next(line for line in lines if 'mock-mixed@1.0.0 — отмечен' in line)
-        self.assertNotIn('может исключать текущую ОС', mixed_line)
-        metadata.write_text(json.dumps({'name': 'mock-native', 'version': '1.0.0', 'os': 'linux'}))
-        incomplete = ns.inventory(source.parent)
-        self.assertIsNone(incomplete['projects']['app']['local']['node_constraints'])
-        changes = ns.record_projects(source.parent, self.shared, source_state, 'linux', key=key, current=incomplete)
-        self.assertFalse(any('Ограничения Node.js-пакета' in item for item in changes))
-        metadata.write_text(json.dumps({'name': 'mock-native', 'version': '1.0.0', 'os': ['win32']}))
-        ns.record_projects(source.parent, self.shared, source_state, 'linux', key=key)
-        text = ns.write_project_report(self.shared, target_state, 'windows', ns.inventory(target.parent),
-                                       key=key, include_peers=True, platform='win32').read_text()
-        latest = next(line for line in text.splitlines() if 'mock-native@1.0.0 — отмечен' in line)
-        self.assertIn('OS в метаданных: win32', latest)
-        self.assertNotIn('может исключать текущую ОС', latest)
-        metadata.write_text(json.dumps({'name': 'mock-native', 'version': '1.0.0'}))
-        ns.record_projects(source.parent, self.shared, source_state, 'linux', key=key)
-        text = ns.write_project_report(self.shared, target_state, 'windows', ns.inventory(target.parent),
-                                       key=key, include_peers=True, platform='win32').read_text()
-        latest = next(line for line in text.splitlines() if 'mock-native@1.0.0 — отмечен' in line)
-        self.assertNotIn('OS в метаданных', latest)
 
-    def test_project_report_includes_manual_node_restore_suggestion(self):
-        project = self.root / 'Nexus' / 'app'
-        project.mkdir(parents=True)
-        (project / 'package.json').write_text('{"name":"mock"}')
-        (project / 'package-lock.json').write_text('{}')
-        state = self.root / 'state'
-        state.mkdir()
-        current = ns.inventory(project.parent)
-        current['executables'].update({'node': True, 'npm': True})
-        report = ns.write_project_report(self.shared, state, 'mock', current,
-                                         key=b'm' * 32, include_peers=True)
-        text = report.read_text()
-        self.assertIn('Предложения для проверки вручную', text)
-        self.assertIn('`npm ci`', text)
-        self.assertFalse((project / 'node_modules').exists())
 
-    def test_empty_environments_appear_in_local_report_and_disappear_when_populated(self):
-        nexus = self.root / 'Nexus'
-        project = nexus / 'app'
-        project.mkdir(parents=True)
-        (project / 'requirements.txt').write_text('mock==1\n')
-        (project / 'package.json').write_text('{}')
-        (project / '.venv').mkdir()
-        (project / 'node_modules').mkdir()
-        state = self.root / 'state'
-        state.mkdir()
-        current = ns.inventory(nexus)
-        report = self.write_project_report(self.shared, state, 'linux', current, include_peers=False)
-        self.assertIn('Каталог Python-окружения пуст', report.read_text())
-        self.assertIn('Каталог node_modules пуст', report.read_text())
-        (project / '.venv' / 'pyvenv.cfg').write_text('mock\n')
-        (project / 'node_modules' / 'mock-package').mkdir()
-        reasons = {item['reason'] for item in ns.project_actions(ns.inventory(nexus))}
-        self.assertNotIn('Каталог Python-окружения пуст', reasons)
-        self.assertNotIn('Каталог node_modules пуст', reasons)
 
     def test_maps_project_paths_between_operating_systems_without_prefix_guessing(self):
         self.assertEqual(ns.map_path('/home/user/Nexus', r'D:\Nexus', '/home/user/Nexus/Bot/src'), r'D:\Nexus\Bot\src')
@@ -2890,750 +1943,26 @@ class NexusSyncTests(unittest.TestCase):
         write(self.chat, windows)
         self.assertEqual(relation(), 'DIVERGED')
 
-    def test_local_environments_are_not_copied_or_installed(self):
-        project = self.root / 'Nexus' / 'app'
-        project.mkdir(parents=True)
-        (project / 'package.json').write_text('{}')
-        (project / 'package-lock.json').write_text('{}')
-        current = ns.inventory(project.parent)
-        current['executables'].update({'node': True, 'npm': True})
-        actions = ns.project_actions(current)
-        self.assertEqual(actions[0]['command'], 'npm ci')
-        self.assertFalse((project / 'node_modules').exists())
 
-    def test_project_change_events_do_not_include_manifest_contents(self):
-        project = self.root / 'Nexus' / 'app'
-        project.mkdir(parents=True)
-        req = project / 'requirements.txt'
-        req.write_text('private-internal-package==1')
-        state = self.root / 'local-state'
-        state.mkdir()
-        self.assertEqual(self.record_projects(project.parent, self.shared, state, 'linux'), [])
-        req.write_text('private-internal-package==2')
-        changes = self.record_projects(project.parent, self.shared, state, 'linux')
-        self.assertEqual(changes, ['Изменён манифест: app/requirements.txt'])
-        event = next((self.shared / 'nexus-sync' / 'project-events' / 'linux').iterdir())
-        self.assertNotIn(b'private-internal-package', event.read_bytes())
-        self.assertEqual(self.project_log(self.shared)[0]['changes'], changes)
-        self.assertEqual(self.record_projects(project.parent, self.shared, state, 'linux'), [])
 
-    def test_project_events_are_encrypted_and_tampering_is_detected(self):
-        nexus = self.root / 'Nexus'
-        project = nexus / 'private-project'
-        project.mkdir(parents=True)
-        manifest = project / 'requirements.txt'
-        manifest.write_text('one')
-        state = self.root / 'state'
-        state.mkdir()
-        self.record_projects(nexus, self.shared, state, 'linux')
-        manifest.write_text('two')
-        baseline = state / 'projects-linux.json'
-        baseline_before = baseline.read_bytes()
-        with self.assertRaises(ValueError):
-            ns.record_projects(nexus, self.shared, state, 'linux', key=b'bad')
-        self.assertEqual(baseline.read_bytes(), baseline_before)
-        changes = self.record_projects(nexus, self.shared, state, 'linux')
-        directory = self.shared / 'nexus-sync' / 'project-events' / 'linux'
-        event = next(directory.glob('*.nxe'))
-        self.assertNotIn(b'private-project', event.read_bytes())
-        self.assertEqual(self.project_log(self.shared)[0]['changes'], changes)
-        with self.assertRaises(ns.SyncError):
-            ns.project_log(self.shared, b'b' * 32)
-        original = event.read_bytes()
-        event.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
-        with self.assertRaises(ns.SyncError):
-            self.project_log(self.shared)
-        event.write_bytes(original)
-        legacy = directory / 'legacy.json'
-        legacy.write_text(json.dumps({'format': 'nexus-project-event-v1', 'machine': 'linux',
-                                      'created': '2026-01-01', 'changes': ['old']}))
-        self.assertEqual(len(self.project_log(self.shared)), 1)
-        self.assertEqual(len(self.project_log(self.shared, include_legacy=True)), 2)
 
-    def test_project_event_cli_uses_key(self):
-        nexus = self.root / 'Nexus'
-        project = nexus / 'app'
-        project.mkdir(parents=True)
-        manifest = project / 'requirements.txt'
-        manifest.write_text('one')
-        state = self.root / 'state'
-        state.mkdir()
-        key = self.root / 'key'
-        key.write_bytes(self.key)
-        script = str(Path(ns.__file__))
-        record = [sys.executable, script, 'projects-record', '--nexus', str(nexus),
-                  '--shared', str(self.shared), '--state-dir', str(state), '--machine', 'linux',
-                  '--key-file', str(key)]
-        subprocess.run(record, check=True, capture_output=True)
-        manifest.write_text('two')
-        subprocess.run(record, check=True, capture_output=True)
-        log = subprocess.run([sys.executable, script, 'projects-log', '--shared', str(self.shared),
-                              '--key-file', str(key)], check=True, capture_output=True, text=True)
-        self.assertIn('app/requirements.txt', log.stdout)
 
-    def test_secret_bundle_encrypts_and_recovers_without_overwrite(self):
-        secret = self.root / '.env'
-        secret.write_bytes(b'PASSWORD=do-not-leak')
-        bundle = ns.secrets_pack([secret], self.shared, 'linux', self.key)
-        self.assertNotIn(b'do-not-leak', bundle.read_bytes())
-        target = self.root / 'secrets-recovered'
-        self.assertEqual(ns.secrets_extract(bundle, target, self.key, self.shared), 1)
-        self.assertEqual((target / '.env').read_bytes(), secret.read_bytes())
-        with self.assertRaises(FileExistsError):
-            ns.secrets_extract(bundle, target, self.key, self.shared)
-        with self.assertRaises(ns.SyncError):
-            ns.secrets_extract(bundle, self.root / 'wrong-key', b'b' * 32, self.shared)
-        with self.assertRaises(ns.SyncError):
-            ns.secrets_extract(bundle, self.shared / 'unsafe', self.key, self.shared)
 
-    def test_secret_quarantine_integrity_includes_excluded_and_empty_directories(self):
-        root = self.root / 'quarantine'
-        root.mkdir()
-        (root / '.env').write_text('mock')
-        original = ns._secret_tree_tag(root, self.key)
-        (root / '.venv').mkdir()
-        with_empty_directory = ns._secret_tree_tag(root, self.key)
-        self.assertNotEqual(original, with_empty_directory)
-        (root / '.venv' / 'hidden').write_text('mock')
-        self.assertNotEqual(with_empty_directory, ns._secret_tree_tag(root, self.key))
-        if os.name != 'nt':
-            (root / 'linked').symlink_to(root / '.env')
-            with self.assertRaises(ns.SyncError):
-                ns._secret_tree_tag(root, self.key)
 
-    def test_secret_plan_compares_without_writing_or_exposing_contents(self):
-        sender = self.root / 'sender'
-        incoming = sender / 'app'
-        incoming.mkdir(parents=True)
-        for name in ('same.env', 'conflict.env', 'missing.env', 'ambiguous.env', 'linked.env'):
-            (incoming / name).write_text('MOCK_PRIVATE_VALUE')
-        package = ns.secrets_pack(list(incoming.iterdir()), self.shared, 'linux', self.key, root=sender)
-        nexus = self.root / 'Nexus'
-        target = nexus / 'app'
-        target.mkdir(parents=True)
-        (target / 'same.env').write_text('MOCK_PRIVATE_VALUE')
-        (target / 'conflict.env').write_text('MOCK_OTHER_VALUE')
-        (target / 'AMBIGUOUS.env').write_text('mock')
-        if os.name != 'nt':
-            (target / 'linked.env').symlink_to(target / 'same.env')
-        state = self.root / 'state'
-        state.mkdir()
-        key = self.root / 'key'
-        key.write_bytes(self.key)
-        raw = {'format': 'nexus-sync-config-v1', 'machine': 'mac', 'nexus': str(nexus),
-               'codex_home': str(self.codex), 'shared': str(self.shared), 'state_dir': str(state),
-               'key_file': str(key), 'direction': 'send-receive', 'peer_roots': {'linux': '/old/Nexus'},
-               'prepare_secrets': True}
-        cfg = ns.validate_settings(raw)
-        self.assertEqual(ns.prepare_received_secrets(cfg, self.key), 1)
-        plan = ns.plan_prepared_secrets(cfg, self.key, 'linux', package.stem)
-        states = {item['path']: item['state'] for item in plan['files']}
-        self.assertEqual(states['app/same.env'], 'SAME')
-        self.assertEqual(states['app/conflict.env'], 'CONFLICT')
-        self.assertEqual(states['app/missing.env'], 'MISSING')
-        self.assertEqual(states['app/ambiguous.env'], 'AMBIGUOUS_NAME')
-        if os.name != 'nt':
-            self.assertEqual(states['app/linked.env'], 'UNSAFE_PATH')
-        self.assertFalse(plan['applied'])
-        self.assertNotIn('MOCK_PRIVATE_VALUE', json.dumps(plan))
-        self.assertEqual((target / 'conflict.env').read_text(), 'MOCK_OTHER_VALUE')
-        self.assertFalse((target / 'missing.env').exists())
-        config = self.root / 'plan-config.json'
-        config.write_text(json.dumps(raw))
-        cli = subprocess.run([sys.executable, str(Path(ns.__file__)), 'plan-secrets', '--config', str(config),
-                              '--source', 'linux', '--package', package.stem], capture_output=True, text=True)
-        self.assertEqual(cli.returncode, 0, cli.stderr)
-        self.assertNotIn('MOCK_PRIVATE_VALUE', cli.stdout + cli.stderr)
-        self.assertEqual(json.loads(cli.stdout)['files'], plan['files'])
-        with self.assertRaises(ns.SyncError):
-            ns.plan_prepared_secrets(dict(cfg, direction='send-only'), self.key, 'linux', package.stem)
-        encrypted = package.read_bytes()
-        package.write_bytes(encrypted[:-1] + bytes([encrypted[-1] ^ 1]))
-        with self.assertRaises(ns.SyncError):
-            ns.plan_prepared_secrets(cfg, self.key, 'linux', package.stem)
-        package.write_bytes(encrypted)
-        quarantine = state / 'prepared-secrets' / 'linux' / package.stem / 'files'
-        (quarantine / '.venv').mkdir()
-        (quarantine / '.venv' / 'unexpected').write_text('mock')
-        with self.assertRaises(ns.SyncError):
-            ns.plan_prepared_secrets(cfg, self.key, 'linux', package.stem)
 
-    def test_opt_in_automatic_secret_quarantine_without_project_writes(self):
-        nexus = self.root / 'Nexus'
-        nexus.mkdir()
-        state = self.root / 'state'
-        state.mkdir()
-        key = self.root / 'key'
-        key.write_bytes(self.key)
-        sender = self.root / 'sender'
-        (sender / 'app').mkdir(parents=True)
-        secret = sender / 'app' / '.env'
-        secret.write_bytes(b'MOCK_SECRET=one')
-        package = ns.secrets_pack([secret], self.shared, 'linux', self.key, root=sender)
-        raw = {'format': 'nexus-sync-config-v1', 'machine': 'mac', 'nexus': str(nexus),
-               'codex_home': str(self.codex), 'shared': str(self.shared), 'state_dir': str(state),
-               'key_file': str(key), 'direction': 'send-receive', 'peer_roots': {'linux': '/old/Nexus'}}
-        cfg = ns.validate_settings(raw)
-        self.assertEqual(ns.prepare_received_secrets(cfg, self.key), 0)
-        raw['prepare_secrets'] = True
-        cfg = ns.validate_settings(raw)
-        send_only = dict(cfg, direction='send-only')
-        self.assertEqual(ns.prepare_received_secrets(send_only, self.key), 0)
-        _, notes = ns.supervisor_once(cfg, None)
-        self.assertTrue(any('Подготовлено пакетов выбранных файлов: 1' in note for note in notes))
-        self.assertNotIn('MOCK_SECRET', '\n'.join(notes))
-        prepared = state / 'prepared-secrets' / 'linux' / package.stem
-        self.assertEqual((prepared / 'files' / 'app' / '.env').read_bytes(), secret.read_bytes())
-        self.assertFalse((nexus / 'app').exists())
-        self.assertNotIn('MOCK_SECRET', (prepared / 'prepared.json').read_text())
-        status = ns.configured_status(cfg, self.key)
-        self.assertEqual(status['prepared_secret_records'], 1)
-        self.assertEqual(status['prepared_secret_invalid'], 0)
-        self.assertIn('содержимое не проверено', status['message'])
-        self.assertEqual(ns.prepare_received_secrets(cfg, self.key), 0)
-        flat = ns.secrets_pack([secret], self.shared, 'linux', self.key)
-        self.assertEqual(ns.prepare_received_secrets(cfg, self.key), 0)
-        self.assertFalse((state / 'prepared-secrets' / 'linux' / flat.stem).exists())
-        (prepared / 'files' / 'app' / '.env').write_bytes(b'modified')
-        secret.write_bytes(b'MOCK_SECRET=two')
-        later = ns.secrets_pack([secret], self.shared, 'linux', self.key, root=sender)
-        with self.assertRaises(ns.SyncError):
-            ns.prepare_received_secrets(cfg, self.key)
-        self.assertEqual((state / 'prepared-secrets' / 'linux' / later.stem / 'files' / 'app' / '.env').read_bytes(), b'MOCK_SECRET=two')
-        (prepared / 'prepared.json').write_text('{}')
-        status = ns.configured_status(cfg, self.key)
-        self.assertEqual(status['prepared_secret_records'], 1)
-        self.assertEqual(status['prepared_secret_invalid'], 1)
-        self.assertNotIn('MOCK_SECRET', json.dumps(status, ensure_ascii=False))
 
-    def test_opt_in_secret_discovery_publishes_new_matching_files(self):
-        nexus = self.root / 'Nexus'
-        project = nexus / 'Bot'
-        project.mkdir(parents=True)
-        selected = project / '.env'
-        selected.write_text('MOCK_PRIVATE=first')
-        (project / '.env.example').write_text('MOCK_EXAMPLE=first')
-        named_credentials = ('.npmrc', '.pypirc', '.netrc', '.git-credentials', '.pgpass', '.htpasswd')
-        for name in named_credentials:
-            (project / name).write_text('MOCK_NAMED_CREDENTIAL')
-        (project / 'requirements.txt').write_text('example==1\n')
-        excluded = project / 'node_modules'
-        excluded.mkdir()
-        (excluded / '.env').write_text('NOT_SELECTED=mock')
-        key = self.root / 'key'
-        key.write_bytes(self.key)
-        state = self.root / 'state'
-        state.mkdir()
-        report = self.write_project_report(self.shared, state, 'linux', ns.inventory(nexus), include_peers=False)
-        self.assertNotIn('MOCK_NAMED_CREDENTIAL', report.read_text())
-        self.assertNotIn('MOCK_PRIVATE', report.read_text())
-        raw = {'format': 'nexus-sync-config-v1', 'machine': 'linux', 'nexus': str(nexus),
-               'codex_home': str(self.codex), 'shared': str(self.shared), 'state_dir': str(state),
-               'key_file': str(key), 'secret_files': [str(selected)]}
-        cfg = ns.validate_settings(raw)
-        self.assertFalse(cfg['discover_secrets'])
-        raw['discover_secrets'] = True
-        cfg = ns.validate_settings(raw)
-        self.assertEqual({path.relative_to(nexus).as_posix() for path in
-                          ns.discover_secret_files(nexus, (self.shared, self.codex))},
-                         {'Bot/.env', 'Bot/.env.example', *(f'Bot/{name}' for name in named_credentials)})
-        self.assertTrue(ns.publish_secrets_once(cfg, self.key))
-        self.assertFalse(ns.publish_secrets_once(cfg, self.key))
-        added = project / 'mock.pem'
-        added.write_text('MOCK_PRIVATE=second')
-        self.assertTrue(ns.publish_secrets_once(cfg, self.key))
-        folder = self.shared / 'nexus-sync' / 'secrets' / 'linux'
-        package = folder / json.loads((state / 'last-secrets-linux.json').read_text())['package']
-        self.assertNotIn(b'MOCK_PRIVATE', package.read_bytes())
-        quarantine = self.root / 'discovered-quarantine'
-        self.assertNotIn(b'MOCK_NAMED_CREDENTIAL', package.read_bytes())
-        self.assertEqual(ns.secrets_extract(package, quarantine, self.key, self.shared), 3 + len(named_credentials))
-        for name in named_credentials:
-            self.assertEqual((quarantine / 'Bot' / name).read_text(), 'MOCK_NAMED_CREDENTIAL')
-        self.assertEqual((quarantine / 'Bot' / 'mock.pem').read_text(), 'MOCK_PRIVATE=second')
-        self.assertFalse((quarantine / 'Bot' / 'node_modules').exists())
-        raw['discover_secrets'] = 'yes'
-        with self.assertRaises(ns.SyncError):
-            ns.validate_settings(raw)
 
-    def test_secret_discovery_retries_when_file_list_changes(self):
-        nexus = self.root / 'Nexus'
-        nexus.mkdir()
-        first, second = nexus / '.env', nexus / 'new.key'
-        first.write_text('mock one')
-        second.write_text('mock two')
-        key = self.root / 'key'
-        key.write_bytes(self.key)
-        state = self.root / 'state'
-        state.mkdir()
-        cfg = ns.validate_settings({'format': 'nexus-sync-config-v1', 'machine': 'linux',
-            'nexus': str(nexus), 'codex_home': str(self.codex), 'shared': str(self.shared),
-            'state_dir': str(state), 'key_file': str(key), 'discover_secrets': True})
-        with mock.patch.object(ns, 'discover_secret_files', side_effect=[[first], [first, second]]):
-            with self.assertRaises(ns.SyncError):
-                ns.publish_secrets_once(cfg, self.key)
-        self.assertFalse((state / 'last-secrets-linux.json').exists())
-        self.assertTrue(ns.publish_secrets_once(cfg, self.key))
-        if os.name != 'nt':
-            (nexus / 'bad.pem').symlink_to(first)
-            with self.assertRaises(ns.SyncError):
-                ns.discover_secret_files(nexus, (self.shared, self.codex))
 
-    def test_watcher_publishes_only_explicit_secrets_and_retries_damage(self):
-        nexus = self.root / 'Nexus'
-        nexus.mkdir()
-        secret = nexus / '.env'
-        secret.write_bytes(b'FAKE_PRIVATE=first-value')
-        other_project = nexus / 'Bot'
-        other_project.mkdir()
-        other_secret = other_project / '.env'
-        other_secret.write_bytes(b'OTHER_PRIVATE=mock-value')
-        key = self.root / 'key'
-        key.write_bytes(self.key)
-        state = self.root / 'state'
-        state.mkdir()
-        raw = {'format': 'nexus-sync-config-v1', 'machine': 'linux', 'nexus': str(nexus),
-               'codex_home': str(self.codex), 'shared': str(self.shared), 'state_dir': str(state),
-               'key_file': str(key), 'secret_files': [str(secret), str(other_secret)]}
-        cfg = ns.validate_settings(raw)
-        previous, notes = ns.supervisor_once(cfg, None)
-        self.assertTrue(any('пакет выбранных файлов' in note for note in notes))
-        folder = self.shared / 'nexus-sync' / 'secrets' / 'linux'
-        packages = list(folder.glob('*.nxs'))
-        self.assertEqual(len(packages), 1)
-        self.assertNotIn(b'first-value', packages[0].read_bytes())
-        self.assertNotIn(b'Bot', packages[0].read_bytes())
-        marker = (state / 'last-secrets-linux.json').read_text()
-        self.assertNotIn('first-value', marker)
-        self.assertNotIn('.env', marker)
-        _, notes = ns.supervisor_once(cfg, previous)
-        self.assertFalse(any('пакет выбранных файлов' in note for note in notes))
-        self.assertEqual(len(list(folder.glob('*.nxs'))), 1)
-        secret.write_bytes(b'FAKE_PRIVATE=second-value')
-        _, notes = ns.supervisor_once(cfg, previous)
-        self.assertTrue(any('пакет выбранных файлов' in note for note in notes))
-        self.assertEqual(len(list(folder.glob('*.nxs'))), 2)
-        current = json.loads((state / 'last-secrets-linux.json').read_text())['package']
-        (folder / current).write_bytes(b'broken')
-        self.assertTrue(ns.publish_secrets_once(cfg, self.key))
-        self.assertEqual(len(list(folder.glob('*.nxs'))), 3)
-        final_package = json.loads((state / 'last-secrets-linux.json').read_text())['package']
-        restored = self.root / 'restored-secrets'
-        ns.secrets_extract(folder / final_package, restored, self.key, self.shared)
-        self.assertEqual((restored / '.env').read_bytes(), b'FAKE_PRIVATE=second-value')
-        self.assertEqual((restored / 'Bot' / '.env').read_bytes(), b'OTHER_PRIVATE=mock-value')
-        raw['secret_files'] = [str(key)]
-        with self.assertRaises(ns.SyncError):
-            ns.validate_settings(raw)
-        unencrypted = self.shared / 'already-shared'
-        unencrypted.write_bytes(b'fake')
-        raw['secret_files'] = [str(unencrypted)]
-        with self.assertRaises(ns.SyncError):
-            ns.validate_settings(raw)
 
-    def test_missing_selected_secret_does_not_block_chat_and_retries(self):
-        nexus = self.root / 'Nexus'
-        project = nexus / 'Bot'
-        project.mkdir(parents=True)
-        secret = project / '.env'
-        state = self.root / 'state'
-        state.mkdir()
-        key = self.root / 'key'
-        key.write_bytes(self.key)
-        config = self.root / 'config.json'
-        config.write_text(json.dumps({'format': 'nexus-sync-config-v1', 'machine': 'linux',
-            'nexus': str(nexus), 'codex_home': str(self.codex), 'shared': str(self.shared),
-            'state_dir': str(state), 'key_file': str(key), 'secret_files': [str(secret)]}))
-        with mock.patch.object(ns, 'secret_fingerprint', side_effect=AssertionError('config must not read secrets')):
-            cfg = ns.load_settings(config)
-        previous, notes = ns.supervisor_once(cfg, None)
-        self.assertTrue(any('Пакет выбранных файлов отложен' in note for note in notes))
-        self.assertTrue(any('снимок' in note for note in notes))
-        self.assertNotIn(str(secret), '\n'.join(notes))
-        self.assertTrue((state / 'project-changelog-linux.md').is_file())
-        self.assertEqual(len(list((self.shared / 'nexus-sync' / 'snapshots' / 'linux').iterdir())), 1)
-        self.assertEqual(ns.configured_status(cfg, self.key)['state'], 'snapshot_ready')
-        self.assertEqual(ns.configured_status(cfg, self.key)['outgoing_packages']['secret_state'], 'pending')
-        secret.write_bytes(b'FAKE_SECRET=arrived')
-        _, notes = ns.supervisor_once(cfg, previous)
-        self.assertTrue(any('зашифрованный пакет' in note for note in notes))
-        packages = list((self.shared / 'nexus-sync' / 'secrets' / 'linux').glob('*.nxs'))
-        self.assertEqual(len(packages), 1)
-        self.assertNotIn(b'FAKE_SECRET', packages[0].read_bytes())
-        self.assertNotIn('arrived', '\n'.join(notes))
-        outgoing = ns.configured_status(cfg, self.key)
-        self.assertEqual(outgoing['outgoing_packages']['secret_state'], 'marker_verified')
-        self.assertIn('содержимое и доставка не проверены', outgoing['message'])
-        self.assertNotIn('FAKE_SECRET', json.dumps(outgoing, ensure_ascii=False))
-        marker = state / 'last-secrets-linux.json'
-        original_marker = marker.read_bytes()
-        tampered = json.loads(original_marker)
-        tampered['fingerprint'] = '0' * 64
-        marker.write_text(json.dumps(tampered))
-        self.assertEqual(ns.configured_status(cfg, self.key)['outgoing_package_invalid'], 1)
-        marker.write_bytes(original_marker)
-        original_package = packages[0].read_bytes()
-        packages[0].write_bytes(b'broken')
-        self.assertEqual(ns.configured_status(cfg, self.key)['outgoing_package_invalid'], 1)
-        packages[0].write_bytes(original_package)
 
-    def test_nested_secret_bundle_refuses_escaping_and_colliding_paths(self):
-        AESGCM, _ = ns._aead()
-        nonce = b'x' * 12
-        for index, paths in enumerate((['../escape'], ['/absolute'], ['a/../../escape'],
-                                       ['CON'], ['COM1.env'], ['file', 'file/nested'], ['A/key', 'a/key'],
-                                       ['caf\u00e9/key', 'cafe\u0301/key'], ['CAF\u00c9', 'cafe\u0301/nested'])):
-            payload = json.dumps({'version': 2, 'files': [{'name': name, 'data': 'ZmFrZQ=='} for name in paths]}).encode()
-            encrypted = ns.SECRET_MAGIC + nonce + AESGCM(self.key).encrypt(nonce, payload, ns.SECRET_MAGIC)
-            bundle = self.shared / f'bad-{index}.nxs'
-            bundle.write_bytes(encrypted)
-            target = self.root / f'unsafe-{index}'
-            with self.assertRaises(ns.SyncError):
-                ns.secrets_extract(bundle, target, self.key, self.shared)
-            self.assertFalse(target.exists())
 
-    @unittest.skipUnless(shutil.which('git'), 'Git is required')
-    def test_git_history_is_encrypted_and_bundle_can_be_read(self):
-        repo = self.root / 'repo'
-        repo.mkdir()
-        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
-        (repo / 'file.txt').write_text('example', encoding='utf-8')
-        subprocess.run(['git', '-C', str(repo), 'add', 'file.txt'], check=True)
-        subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'first'], check=True)
-        (repo / 'file.txt').write_text('staged text', encoding='utf-8')
-        (repo / 'image.bin').write_bytes(b'\x00staged-binary\xff')
-        subprocess.run(['git', '-C', str(repo), 'add', 'file.txt', 'image.bin'], check=True)
-        (repo / 'file.txt').write_text('unstaged text', encoding='utf-8')
-        packed = ns.git_pack(repo, self.shared, 'linux', self.key)
-        self.assertNotIn(b'staged text', packed.read_bytes())
-        restored = self.root / 'git-quarantine'
-        ns.secrets_extract(packed, restored, self.key, self.shared)
-        result = subprocess.run(['git', 'bundle', 'list-heads', str(restored / 'repository.bundle')], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(result.stdout.strip())
-        metadata = json.loads((restored / 'repository.json').read_text())
-        self.assertFalse(metadata['working_tree_included'])
-        self.assertEqual(metadata['head_ref'], subprocess.check_output(
-            ['git', '-C', str(repo), 'symbolic-ref', 'HEAD'], text=True).strip())
-        clone = self.root / 'disposable-repo'
-        subprocess.run(['git', 'clone', '-q', str(restored / 'repository.bundle'), str(clone)], check=True)
-        apply = subprocess.run(['git', '-C', str(clone), 'apply', '--cached', '--binary', str(restored / 'staged.patch')], capture_output=True)
-        self.assertEqual(apply.returncode, 0, apply.stderr.decode(errors='replace'))
-        tracked = subprocess.check_output(['git', '-C', str(clone), 'show', ':file.txt'])
-        binary = subprocess.check_output(['git', '-C', str(clone), 'show', ':image.bin'])
-        self.assertEqual(tracked, b'staged text')
-        self.assertEqual(binary, b'\x00staged-binary\xff')
-        self.assertEqual((repo / 'file.txt').read_text(), 'unstaged text')
-        self.assertEqual(ns.git_status(repo)['modified'], 1)
-        real_run = subprocess.run
-        def change_index_after_bundle(args, **kwargs):
-            result = real_run(args, **kwargs)
-            if 'bundle' in args and 'create' in args:
-                (repo / 'file.txt').write_text('concurrent staged change', encoding='utf-8')
-                real_run(['git', '-C', str(repo), 'add', 'file.txt'], check=True)
-            return result
-        with mock.patch.object(ns.subprocess, 'run', side_effect=change_index_after_bundle):
-            with self.assertRaisesRegex(ns.SyncError, 'индекс изменился'):
-                ns.git_pack(repo, self.shared, 'linux', self.key)
-        self.assertEqual(len(list((self.shared / 'nexus-sync' / 'secrets' / 'linux').glob('*.nxs'))), 1)
-        (repo / '.git' / 'index.lock').write_text('test lock')
-        with self.assertRaisesRegex(ns.SyncError, 'индекс занят'):
-            ns.git_pack(repo, self.shared, 'linux', self.key)
 
-    @unittest.skipUnless(shutil.which('git'), 'Git is required')
-    def test_git_preview_restores_branch_and_index_in_separate_directory(self):
-        nexus = self.root / 'Nexus'
-        repo = nexus / 'app'
-        repo.mkdir(parents=True)
-        state = self.root / 'state'
-        state.mkdir()
-        key = self.root / 'key'
-        key.write_bytes(self.key)
-        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
-        subprocess.run(['git', '-C', str(repo), 'checkout', '-qb', 'feature/mock'], check=True)
-        source = repo / 'file'
-        source.write_text('base')
-        subprocess.run(['git', '-C', str(repo), 'add', 'file'], check=True)
-        subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Test', '-c',
-                        'user.email=test@example.invalid', 'commit', '-qm', 'first'], check=True)
-        source.write_text('base second')
-        subprocess.run(['git', '-C', str(repo), 'add', 'file'], check=True)
-        subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Test', '-c',
-                        'user.email=test@example.invalid', 'commit', '-qm', 'second'], check=True)
-        source.write_text('staged')
-        subprocess.run(['git', '-C', str(repo), 'add', 'file'], check=True)
-        source.write_text('unstaged')
-        remote = 'https://mock-user:mock-secret@example.invalid/repo.git'
-        subprocess.run(['git', '-C', str(repo), 'remote', 'add', 'origin', remote], check=True)
-        before_remote = ns.git_fingerprint(repo, nexus, self.key)
-        subprocess.run(['git', '-C', str(repo), 'remote', 'set-url', '--push', 'origin',
-                        'https://example.invalid/push.git'], check=True)
-        self.assertNotEqual(before_remote, ns.git_fingerprint(repo, nexus, self.key))
-        subprocess.run(['git', '-C', str(repo), 'update-ref', 'refs/remotes/origin/feature/mock', 'HEAD^'], check=True)
-        subprocess.run(['git', '-C', str(repo), 'branch', 'other-local', 'HEAD^'], check=True)
-        before_upstream = ns.git_fingerprint(repo, nexus, self.key)
-        subprocess.run(['git', '-C', str(repo), 'config', 'branch.feature/mock.remote', 'origin'], check=True)
-        subprocess.run(['git', '-C', str(repo), 'config', 'branch.feature/mock.merge', 'refs/heads/feature/mock'], check=True)
-        self.assertNotEqual(before_upstream, ns.git_fingerprint(repo, nexus, self.key))
-        package = ns.git_pack(repo, self.shared, 'linux', self.key, nexus=nexus)
-        self.assertNotIn(b'mock-secret', package.read_bytes())
-        config = self.root / 'config.json'
-        config.write_text(json.dumps({'format': 'nexus-sync-config-v1', 'machine': 'mac',
-            'nexus': str(nexus), 'codex_home': str(self.codex), 'shared': str(self.shared),
-            'state_dir': str(state), 'key_file': str(key), 'peer_roots': {'linux': '/mock/Nexus'}}))
-        secret = repo / '.env'
-        secret.write_text('MOCK_PRIVATE=do-not-print')
-        selected = ns.secrets_pack([secret], self.shared, 'linux', self.key, root=nexus)
-        bad = package.parent / ('0' * 32 + '.nxs')
-        bad.write_bytes(b'incomplete')
-        listed = subprocess.run([sys.executable, str(Path(ns.__file__).resolve()), 'packages',
-                                 '--config', str(config)], capture_output=True, text=True)
-        self.assertEqual(listed.returncode, 0, listed.stderr)
-        entries = {item['id']: item for item in json.loads(listed.stdout)}
-        self.assertEqual(entries[package.stem]['type'], 'git')
-        self.assertEqual(entries[package.stem]['project'], 'app')
-        self.assertEqual(entries[selected.stem]['type'], 'selected-files')
-        self.assertEqual(entries[bad.stem]['type'], 'unverified')
-        self.assertNotIn('do-not-print', listed.stdout)
-        self.assertNotIn('staged', listed.stdout)
-        self.assertNotIn('mock-secret', listed.stdout + listed.stderr)
-        self.assertTrue(all(item['type'] == 'unverified' for item in
-                            ns.list_encrypted_packages(ns.load_settings(config), b'z' * 32)))
-        preview = self.root / 'git-preview'
-        result = subprocess.run([sys.executable, str(Path(ns.__file__).resolve()), 'git-preview', str(package),
-                                 '--config', str(config), '--destination', str(preview)], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn('mock-secret', result.stdout + result.stderr)
-        self.assertEqual(subprocess.check_output(['git', '-C', str(preview), 'remote', 'get-url', 'origin'],
-                                                 text=True).strip(), remote)
-        self.assertEqual(subprocess.check_output(['git', '-C', str(preview), 'remote', 'get-url', '--push', 'origin'],
-                                                 text=True).strip(), 'https://example.invalid/push.git')
-        self.assertEqual(subprocess.check_output(['git', '-C', str(preview), 'symbolic-ref', '--short', 'HEAD'], text=True).strip(), 'feature/mock')
-        self.assertEqual(subprocess.check_output(['git', '-C', str(preview), 'rev-parse', '--symbolic-full-name', '@{upstream}'],
-                                                 text=True).strip(), 'refs/remotes/origin/feature/mock')
-        self.assertEqual(subprocess.check_output(['git', '-C', str(preview), 'rev-parse', '@{upstream}']),
-                         subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD^']))
-        self.assertNotEqual(subprocess.run(['git', '-C', str(preview), 'show-ref', '--verify', '--quiet',
-                                            'refs/remotes/origin/other-local']).returncode, 0)
-        self.assertEqual(subprocess.check_output(['git', '-C', str(preview), 'rev-parse', 'refs/heads/other-local']),
-                         subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'refs/heads/other-local']))
-        self.assertEqual(subprocess.check_output(['git', '-C', str(preview), 'show', ':file']), b'staged')
-        self.assertEqual((preview / 'file').read_text(), 'base second')
-        self.assertEqual(source.read_text(), 'unstaged')
-        with self.assertRaises(ns.SyncError):
-            ns.git_preview(package, nexus / 'forbidden', ns.load_settings(config), self.key)
 
-    @unittest.skipUnless(shutil.which('git'), 'Git is required')
-    def test_git_bundle_preserves_detached_head_without_branch(self):
-        repo = self.root / 'detached-repo'
-        repo.mkdir()
-        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
-        (repo / 'file').write_text('first')
-        subprocess.run(['git', '-C', str(repo), 'add', 'file'], check=True)
-        commit = ['git', '-C', str(repo), '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm']
-        subprocess.run(commit + ['first'], check=True)
-        subprocess.run(['git', '-C', str(repo), 'checkout', '-q', '--detach'], check=True)
-        (repo / 'file').write_text('detached commit')
-        subprocess.run(['git', '-C', str(repo), 'add', 'file'], check=True)
-        subprocess.run(commit + ['detached'], check=True)
-        expected = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
-        packed = ns.git_pack(repo, self.shared, 'linux', self.key)
-        restored = self.root / 'git-quarantine'
-        ns.secrets_extract(packed, restored, self.key, self.shared)
-        self.assertIsNone(json.loads((restored / 'repository.json').read_text())['head_ref'])
-        heads = subprocess.check_output(['git', 'bundle', 'list-heads', str(restored / 'repository.bundle')], text=True)
-        self.assertIn(expected + ' HEAD', heads)
-        nexus = self.root / 'Nexus'
-        nexus.mkdir()
-        state = self.root / 'state'
-        state.mkdir()
-        key = self.root / 'key'
-        key.write_bytes(self.key)
-        cfg = ns.validate_settings({'format': 'nexus-sync-config-v1', 'machine': 'mac',
-            'nexus': str(nexus), 'codex_home': str(self.codex), 'shared': str(self.shared),
-            'state_dir': str(state), 'key_file': str(key)})
-        preview = self.root / 'detached-preview'
-        ns.git_preview(packed, preview, cfg, self.key)
-        self.assertEqual(subprocess.check_output(['git', '-C', str(preview), 'rev-parse', 'HEAD'], text=True).strip(), expected)
-        self.assertNotEqual(subprocess.run(['git', '-C', str(preview), 'symbolic-ref', '-q', 'HEAD'], capture_output=True).returncode, 0)
 
-    @unittest.skipUnless(shutil.which('git'), 'Git is required')
-    def test_git_pack_rejects_branch_switch_at_same_commit(self):
-        repo = self.root / 'same-commit-repo'
-        repo.mkdir()
-        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
-        (repo / 'file').write_text('mock')
-        subprocess.run(['git', '-C', str(repo), 'add', 'file'], check=True)
-        subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Test', '-c',
-                        'user.email=test@example.invalid', 'commit', '-qm', 'first'], check=True)
-        subprocess.run(['git', '-C', str(repo), 'branch', 'other'], check=True)
-        real_run = subprocess.run
-        def switch_after_bundle(args, **kwargs):
-            result = real_run(args, **kwargs)
-            if 'bundle' in args and 'create' in args:
-                real_run(['git', '-C', str(repo), 'checkout', '-q', 'other'], check=True)
-            return result
-        with mock.patch.object(ns.subprocess, 'run', side_effect=switch_after_bundle):
-            with self.assertRaisesRegex(ns.SyncError, 'Git-ссылки или индекс'):
-                ns.git_pack(repo, self.shared, 'linux', self.key)
-        self.assertFalse((self.shared / 'nexus-sync' / 'secrets').exists())
 
-    @unittest.skipUnless(shutil.which('git'), 'Git is required')
-    def test_explicit_git_watcher_sends_changes_and_retries_missing_repo(self):
-        nexus = self.root / 'Nexus'
-        repo = nexus / 'Bot'
-        repo.mkdir(parents=True)
-        state = self.root / 'state'
-        state.mkdir()
-        key = self.root / 'key'
-        key.write_bytes(self.key)
-        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
-        (repo / 'file').write_text('first')
-        subprocess.run(['git', '-C', str(repo), 'add', 'file'], check=True)
-        subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Test', '-c',
-                        'user.email=test@example.invalid', 'commit', '-qm', 'first'], check=True)
-        missing = nexus / 'Later'
-        cfg = ns.validate_settings({'format': 'nexus-sync-config-v1', 'machine': 'linux',
-            'nexus': str(nexus), 'codex_home': str(self.codex), 'shared': str(self.shared),
-            'state_dir': str(state), 'key_file': str(key), 'git_repos': [str(repo), str(missing)]})
-        previous, notes = ns.supervisor_once(cfg, None)
-        self.assertTrue(any('Git-пакет' in note and 'Создан' in note for note in notes))
-        self.assertTrue(any('Git-пакет отложен' in note for note in notes))
-        local = ns.configured_status(cfg, self.key)
-        self.assertEqual(local['outgoing_packages']['git_markers'], 1)
-        self.assertEqual(local['outgoing_packages']['git_invalid'], 0)
-        self.assertIn('содержимое и доставка не проверены', local['message'])
-        git_marker = next(state.glob('last-git-linux-*.json'))
-        original_marker = git_marker.read_bytes()
-        git_marker.write_text('{}')
-        self.assertEqual(ns.configured_status(cfg, self.key)['outgoing_package_invalid'], 1)
-        git_marker.write_bytes(original_marker)
-        self.assertTrue(any('снимок' in note for note in notes))
-        folder = self.shared / 'nexus-sync' / 'secrets' / 'linux'
-        packages = list(folder.glob('*.nxs'))
-        self.assertEqual(len(packages), 1)
-        quarantine = self.root / 'git-quarantine'
-        ns.secrets_extract(packages[0], quarantine, self.key, self.shared)
-        self.assertEqual(json.loads((quarantine / 'repository.json').read_text())['project'], 'Bot')
-        self.assertNotIn(str(repo), '\n'.join(notes))
-        _, notes = ns.supervisor_once(cfg, previous)
-        self.assertFalse(any('Git-пакет' in note and 'Создан' in note for note in notes))
-        self.assertEqual(len(list(folder.glob('*.nxs'))), 1)
-        (repo / 'file').write_text('unstaged')
-        ns.supervisor_once(cfg, previous)
-        self.assertEqual(len(list(folder.glob('*.nxs'))), 1)
-        subprocess.run(['git', '-C', str(repo), 'add', 'file'], check=True)
-        _, notes = ns.supervisor_once(cfg, previous)
-        self.assertTrue(any('Git-пакет' in note and 'Создан' in note for note in notes))
-        self.assertEqual(len(list(folder.glob('*.nxs'))), 2)
-        before = set(folder.glob('*.nxs'))
-        missing.mkdir()
-        subprocess.run(['git', 'init', '-q', str(missing)], check=True)
-        (missing / 'file').write_text('later')
-        subprocess.run(['git', '-C', str(missing), 'add', 'file'], check=True)
-        subprocess.run(['git', '-C', str(missing), '-c', 'user.name=Test', '-c',
-                        'user.email=test@example.invalid', 'commit', '-qm', 'later'], check=True)
-        _, notes = ns.supervisor_once(cfg, previous)
-        self.assertTrue(any('Git-пакет' in note and 'Создан' in note for note in notes))
-        added = set(folder.glob('*.nxs')) - before
-        self.assertEqual(len(added), 1)
-        later_quarantine = self.root / 'later-git-quarantine'
-        ns.secrets_extract(added.pop(), later_quarantine, self.key, self.shared)
-        self.assertEqual(json.loads((later_quarantine / 'repository.json').read_text())['project'], 'Later')
-        bad = {'format': 'nexus-sync-config-v1', 'machine': 'linux', 'nexus': str(nexus),
-            'codex_home': str(self.codex), 'shared': str(self.shared), 'state_dir': str(state),
-            'key_file': str(key), 'git_repos': [str(self.root / 'outside')]}
-        with self.assertRaises(ns.SyncError):
-            ns.validate_settings(bad)
 
-    @unittest.skipUnless(shutil.which('git'), 'Git is required')
-    def test_discover_git_handles_nested_repositories_and_worktrees(self):
-        nexus = self.root / 'Nexus'
-        repo = nexus / 'Bot'
-        nested = repo / 'Nested'
-        nested.mkdir(parents=True)
-        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
-        (repo / 'file').write_text('example')
-        subprocess.run(['git', '-C', str(repo), 'add', 'file'], check=True)
-        subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Test', '-c',
-                        'user.email=test@example.invalid', 'commit', '-qm', 'first'], check=True)
-        subprocess.run(['git', 'init', '-q', str(nested)], check=True)
-        linked = nexus / 'Linked'
-        subprocess.run(['git', '-C', str(repo), 'worktree', 'add', '-q', '--detach', str(linked)], check=True)
-        ignored = nexus / 'node_modules' / 'dependency'
-        ignored.mkdir(parents=True)
-        subprocess.run(['git', 'init', '-q', str(ignored)], check=True)
-        for name in ('.pytest_cache', '.mypy_cache', '.ruff_cache', '.tox', '.nox'):
-            nested_cache = nexus / name / 'dependency'
-            nested_cache.mkdir(parents=True)
-            subprocess.run(['git', 'init', '-q', str(nested_cache)], check=True)
-        exchange = nexus / 'exchange'
-        exchange.mkdir()
-        subprocess.run(['git', 'init', '-q', str(exchange)], check=True)
-        found = ns.discover_git_repos(nexus, exchange)
-        self.assertEqual({path.relative_to(nexus).as_posix() for path in found}, {'Bot', 'Bot/Nested', 'Linked'})
-        with self.assertRaises(ns.SyncError):
-            ns.discover_git_repos(nexus, self.root)
-        result = subprocess.run([sys.executable, str(Path(ns.__file__).resolve()), 'discover-git',
-                                 '--nexus', str(nexus), '--shared', str(exchange)], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(set(json.loads(result.stdout)), {'Bot', 'Bot/Nested', 'Linked'})
 
-    @unittest.skipUnless(shutil.which('git'), 'Git is required')
-    def test_discovery_packages_new_repositories_without_duplicates(self):
-        nexus = self.root / 'Nexus'
-        nexus.mkdir()
-        state = self.root / 'state'
-        state.mkdir()
-        key = self.root / 'key'
-        key.write_bytes(self.key)
-        def create_repo(name):
-            repo = nexus / name
-            repo.mkdir()
-            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
-            (repo / 'file').write_text('mock')
-            subprocess.run(['git', '-C', str(repo), 'add', 'file'], check=True)
-            subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Test', '-c',
-                            'user.email=test@example.invalid', 'commit', '-qm', 'first'], check=True)
-            return repo
-        first = create_repo('First')
-        cfg = ns.validate_settings({'format': 'nexus-sync-config-v1', 'machine': 'linux',
-            'nexus': str(nexus), 'codex_home': str(self.codex), 'shared': str(self.shared),
-            'state_dir': str(state), 'key_file': str(key), 'git_repos': [str(first)], 'git_discovery': True})
-        self.assertEqual(sum('Создан зашифрованный Git-пакет' in note for note in ns.git_cycle(cfg)), 1)
-        create_repo('Second')
-        self.assertEqual(sum('Создан зашифрованный Git-пакет' in note for note in ns.git_cycle(cfg)), 1)
-        self.assertEqual(len(list((self.shared / 'nexus-sync' / 'secrets' / 'linux').glob('*.nxs'))), 2)
 
-    @unittest.skipUnless(shutil.which('git'), 'Git is required')
-    def test_git_discovery_preserves_distinct_case_sensitive_repositories(self):
-        nexus = self.root / 'Nexus'
-        nexus.mkdir()
-        state = self.root / 'state'
-        state.mkdir()
-        key = self.root / 'key'
-        key.write_bytes(self.key)
-        for name in ('Project', 'project'):
-            repo = nexus / name
-            if repo.exists():
-                self.skipTest('filesystem does not support distinct case-sensitive names')
-            repo.mkdir()
-            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
-            (repo / 'file').write_text(name)
-            subprocess.run(['git', '-C', str(repo), 'add', 'file'], check=True)
-            subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Test', '-c',
-                            'user.email=test@example.invalid', 'commit', '-qm', 'mock'], check=True)
-        cfg = ns.validate_settings({'format': 'nexus-sync-config-v1', 'machine': 'linux',
-            'nexus': str(nexus), 'codex_home': str(self.codex), 'shared': str(self.shared),
-            'state_dir': str(state), 'key_file': str(key), 'git_discovery': True})
-        notes = ns.git_cycle(cfg)
-        self.assertEqual(sum('Создан зашифрованный Git-пакет' in note for note in notes), 2)
-        self.assertTrue(any('различаются регистром' in note for note in notes))
-        packages = ns.list_encrypted_packages(cfg, self.key)
-        self.assertEqual({item['project'] for item in packages}, {'Project', 'project'})
-        notes = ns.git_cycle(cfg)
-        self.assertFalse(any('Создан зашифрованный Git-пакет' in note for note in notes))
-        self.assertTrue(any('различаются регистром' in note for note in notes))
 
     def test_shared_folder_must_not_overlap_codex(self):
         with self.assertRaises(ns.SyncError):

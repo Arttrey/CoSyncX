@@ -193,7 +193,7 @@ def _add_mock_chat(profile: Path, relative: Path, incoming: Path, thread_id: str
 
 def _mock_legacy_settings_rebase(local: Path, incoming: Path) -> list[bytes] | None:
     """Keep mock-only local settings while appending an exact remote continuation."""
-    if local.stat().st_size > ns.MAX_SECRET_BYTES or incoming.stat().st_size > ns.MAX_SECRET_BYTES:
+    if local.stat().st_size > ns.MAX_CHAT_BYTES or incoming.stat().st_size > ns.MAX_CHAT_BYTES:
         raise ns.SyncError('Моковая история слишком велика для экспериментального объединения')
     local_lines = local.read_bytes().splitlines(keepends=True)
     incoming_lines = incoming.read_bytes().splitlines(keepends=True)
@@ -226,7 +226,7 @@ def _mock_legacy_settings_rebase(local: Path, incoming: Path) -> list[bytes] | N
 
 def _mock_settings_rebase(local: Path, incoming: Path) -> list[bytes]:
     """Experimental, narrowly checked merge of a mock settings-only suffix."""
-    if local.stat().st_size > ns.MAX_SECRET_BYTES or incoming.stat().st_size > ns.MAX_SECRET_BYTES:
+    if local.stat().st_size > ns.MAX_CHAT_BYTES or incoming.stat().st_size > ns.MAX_CHAT_BYTES:
         raise ns.SyncError('Моковая история слишком велика для экспериментального объединения')
     local_lines, incoming_lines = local.read_bytes().splitlines(keepends=True), incoming.read_bytes().splitlines(keepends=True)
     left, right = [json.loads(line) for line in local_lines], [json.loads(line) for line in incoming_lines]

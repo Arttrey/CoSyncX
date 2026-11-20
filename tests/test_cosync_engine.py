@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import socket
 import tempfile
 import unittest
 from unittest import mock
@@ -58,6 +59,16 @@ class EngineTests(unittest.TestCase):
         with self.assertRaises(engine.EngineError):
             engine.ExistingEngine('http://127.0.0.1:29002/other', key)
 
+    @unittest.skipUnless(engine.sys.platform == 'linux' and hasattr(socket, 'TCP_MAXSEG'), 'Linux TCP option')
+    def test_local_api_sets_mss_before_connecting(self):
+        with mock.patch.object(engine.socket, 'socket') as make_socket:
+            sock = make_socket.return_value
+            connection = engine.LocalHTTPConnection('127.0.0.1', 29002, timeout=3)
+            connection.connect()
+        self.assertIn(mock.call.setsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG, 1200), sock.mock_calls)
+        self.assertLess(sock.mock_calls.index(mock.call.setsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG, 1200)),
+                        sock.mock_calls.index(mock.call.connect(('127.0.0.1', 29002))))
+
     def test_managed_start_requires_its_own_marker_and_uses_foreground_process(self):
         binary = self.root / 'syncthing'
         binary.write_bytes(b'synthetic executable')
@@ -107,6 +118,25 @@ class EngineTests(unittest.TestCase):
         self.assertNotIn('SYNTHETIC_SECRET_KEY', json.dumps(result))
         self.assertIn('folder=projects', request.call_args.args[0].full_url)
 
+    def test_inspect_reports_selected_engine_without_exposing_api_key(self):
+        config = self.root / 'config.xml'
+        config.write_text('<configuration><gui><apikey>SYNTHETIC_SECRET_KEY</apikey></gui></configuration>')
+        client = engine.ExistingEngine('http://127.0.0.1:29002', config, config_xml=True)
+        own = 'ABCDEFG-' * 7 + 'ABCDEFG'
+        peer = 'BCDEFGH-' * 7 + 'BCDEFGH'
+        responses = {'system/status': {'myID': own},
+                     'system/connections': {'connections': {peer: {'connected': True}}},
+                     'config/devices': [{'deviceID': own, 'name': 'local'},
+                                        {'deviceID': peer, 'name': 'vps', 'password': 'SYNTHETIC_SECRET_KEY'}],
+                     'config/folders': [{'id': 'projects', 'path': '/projects', 'type': 'sendonly', 'paused': False}]}
+        with mock.patch.object(client, '_get', side_effect=responses.__getitem__):
+            result = client.inspect()
+        self.assertEqual(result['device_id'], own)
+        self.assertEqual(result['devices'], [{'id': peer, 'name': 'vps', 'connected': True}])
+        self.assertEqual(result['folders'], [{'id': 'projects', 'path': '/projects', 'mode': 'sendonly', 'paused': False}])
+        self.assertNotIn('SYNTHETIC_SECRET_KEY', json.dumps(result))
+        self.assertFalse(result['synchronization_confirmed'])
+
     def test_folder_setup_creates_only_new_nonoverlapping_selected_folder(self):
         key = self.root / 'key'
         key.write_text('SYNTHETIC_SECRET_KEY')
@@ -128,6 +158,20 @@ class EngineTests(unittest.TestCase):
             with self.assertRaises(engine.EngineError):
                 client.add_folder('projects', folder, device, mode='sendonly')
             post.assert_not_called()
+
+    def test_archive_toggle_targets_only_selected_folder(self):
+        key = self.root / 'key'
+        key.write_text('SYNTHETIC_SECRET_KEY')
+        client = engine.ExistingEngine('http://127.0.0.1:29002', key)
+        with mock.patch.object(client, '_get', side_effect=[{'id': 'archive-test', 'paused': False},
+                                                           {'id': 'archive-test', 'paused': True}]), \
+                mock.patch.object(client, '_patch') as patch:
+            self.assertEqual(client.set_folder_paused('archive-test', True), {'folder': 'archive-test', 'paused': True})
+        patch.assert_called_once_with('config/folders/archive-test', {'paused': True})
+        with mock.patch.object(client, '_patch') as patch:
+            with self.assertRaises(engine.EngineError):
+                client.set_folder_paused('../other', True)
+            patch.assert_not_called()
 
     def test_peer_setup_rejects_duplicates_and_invalid_addresses(self):
         key = self.root / 'key'

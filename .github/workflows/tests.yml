@@ -21,3 +21,7 @@ jobs:
       - run: python -m pip install -e .
       - run: python -m unittest discover -s tests -q
       - run: cosyncx --help
+      - run: node cursor-extension/test-extension.js
+      - run: node cursor-extension/test-summary-integration.js
+        env:
+          NEXUS_PYTHON: python

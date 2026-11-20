@@ -22,6 +22,129 @@ import mock_loopback_proxy
 @unittest.skipUnless(os.environ.get('NEXUS_TEST_SYNCTHING') == '1' and sys.platform == 'linux',
                      'requires opt-in local Syncthing on Linux')
 class EngineIntegrationTests(unittest.TestCase):
+    def test_live_style_sendonly_encrypted_folder_does_not_write_source(self):
+        binary = Path(os.environ.get('COSYNC_TEST_ENGINE') or shutil.which('syncthing') or '').resolve()
+        with tempfile.TemporaryDirectory(prefix='cosyncx-encrypted-direct-') as tmp:
+            root = Path(tmp)
+            sockets = [socket.socket() for _ in range(4)]
+            try:
+                for sock in sockets:
+                    sock.bind(('127.0.0.1', 0))
+                ports = [sock.getsockname()[1] for sock in sockets]
+            finally:
+                for sock in sockets:
+                    sock.close()
+            homes = [root / 'sender', root / 'receiver']
+            folders = [root / 'source', root / 'encrypted']
+            processes, clients, keys = [], [], []
+            try:
+                for folder in folders:
+                    folder.mkdir()
+                sample = folders[0] / 'rollout-synthetic.jsonl'
+                sample.write_text('{"message":"SYNTHETIC PRIVATE CHAT"}\n', encoding='utf-8')
+                before = [(p.relative_to(folders[0]).as_posix(), p.read_bytes()) for p in folders[0].rglob('*') if p.is_file()]
+                for index in range(2):
+                    engine.prepare_managed(binary, homes[index], gui_port=ports[index],
+                                           listen_address=f'tcp://127.0.0.1:{ports[index + 2]}')
+                    keys.append(ET.parse(homes[index] / 'config.xml').getroot().findtext('gui/apikey'))
+                    clients.append(engine.ExistingEngine(f'http://127.0.0.1:{ports[index]}', homes[index] / 'config.xml', config_xml=True))
+                    processes.append(subprocess.Popen([sys.executable, str(Path(engine.__file__)), 'run-managed',
+                        '--binary', str(binary), '--home', str(homes[index])], stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL, start_new_session=True))
+                ids = [subprocess.check_output([str(binary), 'device-id', '--home', str(h)], text=True, timeout=15).strip() for h in homes]
+                for index, client in enumerate(clients):
+                    deadline = time.monotonic() + 30
+                    while True:
+                        try:
+                            client.ping()
+                            break
+                        except engine.EngineError:
+                            if time.monotonic() >= deadline:
+                                self.fail('test engine unavailable')
+                            time.sleep(0.2)
+                    client.add_peer(ids[1-index], f'tcp://127.0.0.1:{ports[3-index]}')
+                sender = clients[0]._get('config/defaults/folder')
+                sender.update({'id': 'encrypted-chat-test', 'path': str(folders[0]), 'type': 'sendonly',
+                               'markerName': '.', 'devices': [{'deviceID': ids[0]},
+                               {'deviceID': ids[1], 'encryptionPassword': 'synthetic-test-password'}]})
+                receiver = clients[1]._get('config/defaults/folder')
+                receiver.update({'id': 'encrypted-chat-test', 'path': str(folders[1]), 'type': 'receiveencrypted',
+                                 'devices': [{'deviceID': ids[1]}, {'deviceID': ids[0]}]})
+                clients[1]._post('config/folders', receiver)
+                clients[0]._post('config/folders', sender)
+                deadline = time.monotonic() + 45
+                while time.monotonic() < deadline:
+                    state = clients[1].folder_status('encrypted-chat-test')
+                    raw = clients[1]._get('db/status?folder=encrypted-chat-test')
+                    if state['state'] == 'idle' and raw.get('globalFiles', 0) >= 1 and raw.get('needTotalItems') == 0:
+                        break
+                    time.sleep(0.25)
+                else:
+                    self.fail('encrypted synthetic transfer did not finish')
+                encrypted = [p for p in folders[1].rglob('*') if p.is_file() and '.stfolder' not in p.parts]
+                self.assertTrue(encrypted)
+                self.assertTrue(all(b'SYNTHETIC PRIVATE CHAT' not in p.read_bytes() for p in encrypted))
+                restored = root / 'restored'
+                subprocess.run([str(binary), 'decrypt', '--to', str(restored), '--password', 'synthetic-test-password',
+                                str(folders[1])], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+                self.assertEqual((restored / sample.name).read_bytes(), sample.read_bytes())
+                after = [(p.relative_to(folders[0]).as_posix(), p.read_bytes()) for p in folders[0].rglob('*') if p.is_file()]
+                self.assertEqual(before, after)
+                self.assertFalse((folders[0] / '.stfolder').exists())
+                with sample.open('a', encoding='utf-8') as stream:
+                    stream.write('{"message":"SYNTHETIC APPEND"}\n')
+                clients[0]._post('db/scan?folder=encrypted-chat-test', {})
+                deadline = time.monotonic() + 45
+                while time.monotonic() < deadline:
+                    candidate = root / 'restored-update'
+                    if not candidate.exists():
+                        candidate.mkdir()
+                    result = subprocess.run([str(binary), 'decrypt', '--to', str(candidate), '--password',
+                                             'synthetic-test-password', str(folders[1])],
+                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+                    output = candidate / sample.name
+                    if result.returncode == 0 and output.is_file() and output.read_bytes() == sample.read_bytes():
+                        break
+                    shutil.rmtree(candidate)
+                    time.sleep(0.5)
+                else:
+                    self.fail('appended synthetic content did not arrive')
+                self.assertFalse((folders[0] / '.stfolder').exists())
+                clients[0].set_folder_paused('encrypted-chat-test', True)
+                req = urllib.request.Request(f'http://127.0.0.1:{ports[1]}/rest/config/folders/encrypted-chat-test',
+                                             headers={'X-API-Key': keys[1]}, method='DELETE')
+                with clients[1].opener.open(req, timeout=5) as response:
+                    response.read()
+                shutil.rmtree(folders[1])
+                folders[1].mkdir()
+                clients[1]._post('config/folders', receiver)
+                clients[0].set_folder_paused('encrypted-chat-test', False)
+                deadline = time.monotonic() + 45
+                while time.monotonic() < deadline:
+                    candidate = root / 'restored-after-reset'
+                    candidate.mkdir(exist_ok=True)
+                    result = subprocess.run([str(binary), 'decrypt', '--to', str(candidate), '--password',
+                                             'synthetic-test-password', str(folders[1])],
+                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+                    output = candidate / sample.name
+                    if result.returncode == 0 and output.is_file() and output.read_bytes() == sample.read_bytes():
+                        break
+                    shutil.rmtree(candidate)
+                    time.sleep(0.5)
+                else:
+                    self.fail('encrypted receiver did not resynchronize after cleanup')
+            finally:
+                for index, process in enumerate(processes):
+                    if process.poll() is None:
+                        try:
+                            request = urllib.request.Request(f'http://127.0.0.1:{ports[index]}/rest/system/shutdown',
+                                data=b'', headers={'X-API-Key': keys[index]}, method='POST')
+                            with clients[index].opener.open(request, timeout=5):
+                                pass
+                        except OSError:
+                            os.killpg(process.pid, signal.SIGINT)
+                    process.wait(timeout=20)
+
     def test_modified_gui_can_use_existing_syncthing_without_changing_its_config(self):
         binary = Path(os.environ.get('COSYNC_TEST_ENGINE') or shutil.which('syncthing') or '').resolve()
         with tempfile.TemporaryDirectory(prefix='cosyncx-existing-gui-') as tmp:
@@ -159,6 +282,15 @@ class EngineIntegrationTests(unittest.TestCase):
                     client.add_peer(ids[1-index], f'tcp://127.0.0.1:{ports[3-index]}')
                     client.add_folder('mock-project', projects[index], ids[1-index],
                                       mode='sendonly' if index == 0 else 'sendreceive')
+                archive = root / 'synthetic-archive'
+                archive.mkdir()
+                clients[0].add_folder('mock-archive', archive, ids[1], mode='sendonly')
+                for action, expected in (('off', True), ('status', True), ('on', False)):
+                    command = subprocess.run([sys.executable, str(Path(engine.__file__)), 'archive', action,
+                        '--url', f'http://127.0.0.1:{ports[0]}', '--config', str(homes[0] / 'config.xml'),
+                        '--folder', 'mock-archive'], text=True, capture_output=True, check=True, timeout=10)
+                    self.assertEqual(json.loads(command.stdout), {'folder': 'mock-archive', 'paused': expected})
+                    self.assertFalse(clients[0]._get('config/folders/mock-project')['paused'])
                 (projects[0] / 'synthetic.txt').write_text('synthetic transfer\n', encoding='utf-8')
                 deadline = time.monotonic() + 45
                 while time.monotonic() < deadline:
@@ -169,6 +301,11 @@ class EngineIntegrationTests(unittest.TestCase):
                 else:
                     self.fail('synthetic transfer did not finish')
                 self.assertEqual(clients[0]._get('config/folders')[0]['type'], 'sendonly')
+                inspection = clients[0].inspect()
+                self.assertEqual(inspection['device_id'], ids[0])
+                self.assertTrue(any(item['id'] == ids[1] and item['connected'] for item in inspection['devices']))
+                self.assertTrue(any(item['id'] == 'mock-project' and item['mode'] == 'sendonly'
+                                    for item in inspection['folders']))
             finally:
                 for index, process in enumerate(processes):
                     if process.poll() is None:
@@ -210,6 +347,16 @@ class EngineIntegrationTests(unittest.TestCase):
                             self.fail('managed engine did not become reachable')
                         time.sleep(0.2)
                 self.assertEqual(state, {'state': 'reachable'})
+                inspection = client.inspect()
+                self.assertTrue(inspection['device_id'])
+                self.assertEqual(inspection['folders'], [])
+                self.assertEqual(inspection['devices'], [])
+                self.assertFalse(inspection['synchronization_confirmed'])
+                command = subprocess.run([sys.executable, str(Path(engine.__file__)), 'inspect',
+                                          '--url', f'http://127.0.0.1:{port}', '--config', str(home / 'config.xml')],
+                                         text=True, capture_output=True, check=True, timeout=10)
+                self.assertEqual(json.loads(command.stdout), inspection)
+                self.assertNotIn(key, command.stdout + command.stderr)
                 expected = (engine.gui_assets_dir() / 'default' / 'index.html').read_bytes()
                 for marker in (b'CoSyncX', b'SyncthingController', b'addFolder()'):
                     offset = expected.index(marker)

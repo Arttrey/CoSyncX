@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import ipaddress
 import json
 import os
 from pathlib import Path
 import re
+import socket
 import stat
 import subprocess
 import sys
@@ -23,6 +25,29 @@ class EngineError(Exception):
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+class LocalHTTPConnection(http.client.HTTPConnection):
+    def connect(self):
+        if sys.platform != 'linux' or not hasattr(socket, 'TCP_MAXSEG'):
+            return super().connect()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(self.timeout)
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG, 1200)
+            except OSError:
+                pass
+            sock.connect((self.host, self.port))
+            self.sock = sock
+        except BaseException:
+            sock.close()
+            raise
+
+
+class LocalHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, request):
+        return self.do_open(LocalHTTPConnection, request)
 
 
 def bundled_binary() -> Path:
@@ -132,7 +157,7 @@ class ExistingEngine:
         self._url = f'http://127.0.0.1:{port}'
         self._key_file = key_file
         self._config_xml = config_xml
-        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(), LocalHTTPHandler())
 
     def _key(self) -> str:
         limit = 1024 * 1024 if self._config_xml else 512
@@ -190,10 +215,46 @@ class ExistingEngine:
         return {'state': state, 'pending_items': items, 'pending_bytes': size, 'pending_deletions': deleted,
                 'remote_freshness_confirmed': False}
 
+    def inspect(self) -> dict:
+        """Show a minimal, read-only view without returning credentials or full config."""
+        system = self._get('system/status')
+        connections = self._get('system/connections')
+        devices = self._get('config/devices')
+        folders = self._get('config/folders')
+        if (not isinstance(system, dict) or not isinstance(system.get('myID'), str)
+                or not isinstance(connections, dict) or not isinstance(connections.get('connections'), dict)
+                or not isinstance(devices, list) or not isinstance(folders, list)):
+            raise EngineError('Incomplete engine response')
+        own_id = system['myID']
+        peers = []
+        for device in devices:
+            if not isinstance(device, dict) or not isinstance(device.get('deviceID'), str) or not isinstance(device.get('name'), str):
+                raise EngineError('Incomplete device response')
+            device_id = device['deviceID']
+            if device_id == own_id:
+                continue
+            connection = connections['connections'].get(device_id, {})
+            if not isinstance(connection, dict) or type(connection.get('connected', False)) is not bool:
+                raise EngineError('Incomplete connection response')
+            peers.append({'id': device_id, 'name': device['name'], 'connected': connection.get('connected', False)})
+        selected = []
+        for folder in folders:
+            if (not isinstance(folder, dict) or any(not isinstance(folder.get(key), str) for key in ('id', 'path', 'type'))
+                    or type(folder.get('paused')) is not bool):
+                raise EngineError('Incomplete folder response')
+            selected.append({'id': folder['id'], 'path': folder['path'], 'mode': folder['type'], 'paused': folder['paused']})
+        return {'device_id': own_id, 'devices': peers, 'folders': selected, 'synchronization_confirmed': False}
+
     def _post(self, path: str, payload: dict) -> None:
+        self._write('POST', path, payload)
+
+    def _patch(self, path: str, payload: dict) -> None:
+        self._write('PATCH', path, payload)
+
+    def _write(self, method: str, path: str, payload: dict) -> None:
         try:
             data = json.dumps(payload, ensure_ascii=True).encode('utf-8')
-            request = urllib.request.Request(self._url + '/rest/' + path, data=data, method='POST',
+            request = urllib.request.Request(self._url + '/rest/' + path, data=data, method=method,
                 headers={'X-API-Key': self._key(), 'Content-Type': 'application/json'})
             with self.opener.open(request, timeout=5) as response:
                 if not 200 <= response.status < 300:
@@ -201,6 +262,20 @@ class ExistingEngine:
                 response.read(1024 * 1024 + 1)
         except (OSError, ValueError, UnicodeError, ET.ParseError, urllib.error.URLError) as exc:
             raise EngineError('Could not update local engine') from exc
+
+    def set_folder_paused(self, folder_id: str, paused: bool | None) -> dict:
+        if not re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', folder_id) or (paused is not None and type(paused) is not bool):
+            raise EngineError('Invalid folder selection')
+        path = 'config/folders/' + urllib.parse.quote(folder_id, safe='')
+        data = self._get(path)
+        if not isinstance(data, dict) or data.get('id') != folder_id or type(data.get('paused')) is not bool:
+            raise EngineError('Folder is unavailable')
+        if paused is not None and data['paused'] != paused:
+            self._patch(path, {'paused': paused})
+            data = self._get(path)
+            if not isinstance(data, dict) or data.get('id') != folder_id or data.get('paused') is not paused:
+                raise EngineError('Folder setting not confirmed')
+        return {'folder': folder_id, 'paused': data['paused']}
 
     def add_peer(self, device_id: str, address: str) -> None:
         try:
@@ -280,6 +355,11 @@ def main(argv=None) -> int:
     secrets = status.add_mutually_exclusive_group(required=True)
     secrets.add_argument('--api-key-file', type=Path)
     secrets.add_argument('--config', type=Path, help='existing Syncthing config.xml (read only)')
+    inspect = commands.add_parser('inspect', help='show local device, folders and connections without secrets')
+    inspect.add_argument('--url', required=True)
+    secrets = inspect.add_mutually_exclusive_group(required=True)
+    secrets.add_argument('--api-key-file', type=Path)
+    secrets.add_argument('--config', type=Path, help='selected Syncthing config.xml (read only)')
     peer = commands.add_parser('add-peer', help='explicitly add a new peer to a local engine')
     peer.add_argument('--url', required=True)
     peer.add_argument('--config', type=Path, required=True)
@@ -292,6 +372,11 @@ def main(argv=None) -> int:
     folder.add_argument('--path', type=Path, required=True)
     folder.add_argument('--device-id', required=True)
     folder.add_argument('--mode', choices=('sendonly', 'sendreceive'), required=True)
+    archive = commands.add_parser('archive', help='check or switch synchronization of a configured archive folder')
+    archive.add_argument('action', choices=('status', 'on', 'off'))
+    archive.add_argument('--url', required=True)
+    archive.add_argument('--config', type=Path, required=True)
+    archive.add_argument('--folder', required=True, help='ID of the existing archive folder')
     args = parser.parse_args(argv)
     try:
         if args.command == 'prepare-managed':
@@ -301,6 +386,10 @@ def main(argv=None) -> int:
             print(json.dumps({'state': 'prepared', 'external_network': not loopback}))
         elif args.command == 'run-managed':
             return run_managed(args.binary or bundled_binary(), args.home)
+        elif args.command == 'archive':
+            client = ExistingEngine(args.url, args.config, config_xml=True)
+            paused = {'status': None, 'on': False, 'off': True}[args.action]
+            print(json.dumps(client.set_folder_paused(args.folder, paused)))
         elif args.command in ('add-peer', 'add-folder'):
             client = ExistingEngine(args.url, args.config, config_xml=True)
             if args.command == 'add-peer':
@@ -310,7 +399,12 @@ def main(argv=None) -> int:
             print(json.dumps({'state': 'submitted', 'synchronization_confirmed': False}))
         else:
             client = ExistingEngine(args.url, args.config or args.api_key_file, config_xml=bool(args.config))
-            result = client.ping() if args.command == 'ping-existing' else client.folder_status(args.folder)
+            if args.command == 'ping-existing':
+                result = client.ping()
+            elif args.command == 'inspect':
+                result = client.inspect()
+            else:
+                result = client.folder_status(args.folder)
             print(json.dumps(result))
         return 0
     except (EngineError, OSError, UnicodeError, ValueError) as exc:

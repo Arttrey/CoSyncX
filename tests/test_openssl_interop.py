@@ -1,5 +1,4 @@
 """Opt-in OpenSSL EVP interoperability checks with synthetic data only."""
-import base64
 import json
 import os
 from pathlib import Path
@@ -62,7 +61,7 @@ done:
 @unittest.skipUnless(os.environ.get('NEXUS_TEST_OPENSSL') == '1' and shutil.which('cc'),
                      'requires opt-in compiler and OpenSSL development files')
 class OpenSSLInteropTests(unittest.TestCase):
-    def test_mock_chat_and_secret_packages_with_openssl_evp(self):
+    def test_mock_chat_snapshot_with_openssl_evp(self):
         with tempfile.TemporaryDirectory(prefix='nexus-openssl-test-') as tmp:
             root = Path(tmp)
             helper_source = root / 'decrypt.c'
@@ -96,38 +95,7 @@ class OpenSSLInteropTests(unittest.TestCase):
             tampered = decrypt(encrypted[:12], altered_tag, relative.encode('utf-8'), encrypted[12:-16])
             self.assertNotEqual(tampered.returncode, 0)
             self.assertEqual(tampered.stdout, b'')
-            secret = root / '.env'
-            secret.write_bytes(b'MOCK_SECRET=interoperability')
-            package = ns.secrets_pack([secret], shared, 'linux', key).read_bytes()
-            offset = len(ns.SECRET_MAGIC)
-            result = decrypt(package[offset:offset + 12], package[-16:], ns.SECRET_MAGIC, package[offset + 12:-16])
-            self.assertEqual(result.returncode, 0)
-            unpacked = json.loads(result.stdout)
-            self.assertEqual(base64.b64decode(unpacked['files'][0]['data']), secret.read_bytes())
-            wrong_aad = decrypt(package[offset:offset + 12], package[-16:], b'wrong', package[offset + 12:-16])
-            self.assertNotEqual(wrong_aad.returncode, 0)
-            self.assertEqual(wrong_aad.stdout, b'')
-            nonce = package[offset:offset + 12]
-            ciphertext = package[offset + 12:-16]
-            tag = package[-16:]
-            changes = [
-                (nonce, tag, ciphertext, b'\x30' * 32),
-                (bytes([nonce[0] ^ 1]) + nonce[1:], tag, ciphertext, key),
-                (nonce, tag, bytes([ciphertext[0] ^ 1]) + ciphertext[1:], key),
-                (nonce, bytes([tag[0] ^ 1]) + tag[1:], ciphertext, key),
-                (nonce, tag, ciphertext[:-1], key),
-            ]
-            for index, (changed_nonce, changed_tag, changed_ciphertext, changed_key) in enumerate(changes):
-                with self.subTest(case=index):
-                    rejected = decrypt(changed_nonce, changed_tag, ns.SECRET_MAGIC, changed_ciphertext, changed_key)
-                    self.assertNotEqual(rejected.returncode, 0)
-                    self.assertEqual(rejected.stdout, b'')
-            second = ns.secrets_pack([secret], shared, 'linux', key).read_bytes()
-            self.assertNotEqual(package[offset:offset + 12], second[offset:offset + 12])
-            self.assertNotEqual(package, second)
-            independent = decrypt(second[offset:offset + 12], second[-16:], ns.SECRET_MAGIC, second[offset + 12:-16])
-            self.assertEqual(independent.returncode, 0)
-            self.assertEqual(base64.b64decode(json.loads(independent.stdout)['files'][0]['data']), secret.read_bytes())
+
 
 
 if __name__ == '__main__':
