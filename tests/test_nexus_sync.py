@@ -1993,6 +1993,21 @@ class NexusSyncTests(unittest.TestCase):
         self.assertEqual(state('orphan'), 'MISSING')
         self.assertEqual(state('self'), 'INVALID')
 
+    def test_plan_distinguishes_user_and_service_threads(self):
+        incoming = self.root / 'incoming'
+        folder = incoming / 'sessions'
+        folder.mkdir(parents=True)
+        for identity, kind in [('user-chat', 'user'), ('guardian', 'guardian_review'), ('future', 'new-kind')]:
+            (folder / f'rollout-{identity}.jsonl').write_text(json.dumps({
+                'type': 'session_meta', 'payload': {'id': identity, 'thread_source': kind}
+            }) + '\n')
+        plan = {item['chat_hash']: item for item in ns.plan_chats(incoming, self.codex)}
+        def kind(identity):
+            return plan[hashlib.sha256(identity.encode()).hexdigest()]['thread_kind']
+        self.assertEqual(kind('user-chat'), 'USER')
+        self.assertEqual(kind('guardian'), 'SERVICE')
+        self.assertEqual(kind('future'), 'UNKNOWN')
+
     def test_chat_plan_compares_only_structured_paths_across_systems(self):
         incoming = self.root / 'incoming'
         folder = incoming / 'sessions'

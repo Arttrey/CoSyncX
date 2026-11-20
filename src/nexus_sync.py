@@ -669,7 +669,8 @@ def _chat_catalog(root: Path, *, include_unsupported: bool = False) -> dict[str,
                     raise UnsupportedHistoryError('Пагинированная история пока не поддерживается' if unsupported == 'PAGINATED' else 'Неизвестный формат истории пока не поддерживается')
                 catalogue.setdefault(identifier, []).append({'path': path, 'cwd': payload.get('cwd'), 'folder': folder, 'unsupported': unsupported,
                                                             'history_base': payload.get('history_base'),
-                                                            'parent_thread_id': payload.get('parent_thread_id')})
+                                                            'parent_thread_id': payload.get('parent_thread_id'),
+                                                            'thread_source': payload.get('thread_source')})
             except (ValueError, UnicodeError) as exc:
                 raise SyncError('Неподдерживаемые метаданные чата; сравнение остановлено') from exc
     return catalogue
@@ -846,6 +847,8 @@ def plan_chats(incoming: Path, target: Path, source_root: str | None = None, tar
     plan = []
     for identifier, versions in sorted(sources.items()):
         local = targets.get(identifier, [])
+        thread_source = versions[0].get('thread_source') if len(versions) == 1 else None
+        thread_kind = 'USER' if thread_source == 'user' else 'SERVICE' if thread_source in ('subagent', 'guardian_review') else 'UNKNOWN'
         parent_status = 'AMBIGUOUS' if len(versions) != 1 else 'NOT_REQUIRED'
         if len(versions) == 1 and versions[0].get('parent_thread_id') is not None:
             parent = versions[0]['parent_thread_id']
@@ -894,7 +897,7 @@ def plan_chats(incoming: Path, target: Path, source_root: str | None = None, tar
             cwd_status = _history_cwd_status(versions[0]['path'], source_root, target_root)
         plan.append({'chat_hash': hashlib.sha256(identifier.encode('utf-8')).hexdigest(), 'relation': relation, 'cwd': cwd_status,
                      'incoming_format_warning': versions[0]['unsupported'] if len(versions) == 1 else None,
-                     'history_base': base_status, 'parent_thread': parent_status})
+                     'history_base': base_status, 'parent_thread': parent_status, 'thread_kind': thread_kind})
     return plan
 
 
