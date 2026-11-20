@@ -21,7 +21,7 @@ class NexusSyncTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.codex = self.root / 'codex'
         self.shared = self.root / 'shared'
         self.sessions = self.codex / 'sessions' / '2026' / '01' / '01'
@@ -1184,14 +1184,24 @@ class NexusSyncTests(unittest.TestCase):
             'nexus': str(nexus), 'codex_home': str(self.codex), 'shared': str(self.shared),
             'state_dir': str(state), 'key_file': str(key), 'interval_seconds': 10}))
         self.chat.write_bytes(b'{"partial":')
-        with mock.patch.object(ns.time, 'sleep', side_effect=KeyboardInterrupt):
+        def two_cycles_on_windows():
+            calls = 0
+            def tick(_seconds):
+                nonlocal calls
+                calls += 1
+                if sys.platform == 'win32' and calls == 1:
+                    threading.Event().wait(0.2)
+                    return
+                raise KeyboardInterrupt
+            return tick
+        with mock.patch.object(ns.time, 'sleep', side_effect=two_cycles_on_windows()):
             with self.assertRaises(KeyboardInterrupt):
                 ns.run_supervisor(config)
         cfg = ns.load_settings(config)
         self.assertEqual(ns.heartbeat_status(cfg, self.key)['state'], 'error')
         self.assertIn('snapshot', ns.heartbeat_status(cfg, self.key)['errors'])
         self.chat.write_text('{"type":"session_meta","payload":{"id":"test"}}\n')
-        with mock.patch.object(ns.time, 'sleep', side_effect=KeyboardInterrupt):
+        with mock.patch.object(ns.time, 'sleep', side_effect=two_cycles_on_windows()):
             with self.assertRaises(KeyboardInterrupt):
                 ns.run_supervisor(config)
         self.assertEqual(ns.heartbeat_status(cfg, self.key)['state'], 'recent')

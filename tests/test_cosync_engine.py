@@ -14,7 +14,7 @@ class EngineTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
 
     def test_managed_setup_uses_new_isolated_profile_with_no_external_network(self):
         binary = self.root / 'syncthing'
