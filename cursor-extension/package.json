@@ -1,0 +1,33 @@
+{
+  "name": "nexus-sync-status",
+  "displayName": "CoSyncX Status",
+  "description": "Local CoSyncX snapshot status",
+  "version": "0.0.1",
+  "publisher": "nexus-local",
+  "engines": {"vscode": "^1.85.0"},
+  "activationEvents": ["onStartupFinished", "onCommand:nexusSync.refresh"],
+  "main": "./extension.js",
+  "files": ["extension.js"],
+  "contributes": {
+    "commands": [{"command": "nexusSync.refresh", "title": "CoSyncX: обновить статус"}],
+    "configuration": {
+      "title": "CoSyncX",
+      "properties": {
+        "nexusSync.python": {"type": "string", "default": "python3", "scope": "machine", "description": "Python 3.11+ на этом устройстве (на Windows обычно python)."},
+        "nexusSync.script": {"type": "string", "default": "", "scope": "machine", "description": "Абсолютный путь к nexus_sync.py на этом устройстве."},
+        "nexusSync.config": {"type": "string", "default": "", "scope": "machine", "description": "Локальный файл конфигурации Nexus Sync; позволяет видеть подготовленные снимки."},
+        "nexusSync.mockPreviewRoot": {"type": "string", "default": "", "scope": "machine", "description": "Необязательный каталог моковых чатов в /tmp; не отражает реальные чаты Cursor."},
+        "nexusSync.mockChatProfile": {"type": "string", "default": "", "scope": "machine", "description": "Необязательный моковый профиль в /tmp; не отражает реальные чаты Cursor."},
+        "nexusSync.mockSyncthingConfig": {"type": "string", "default": "", "scope": "machine", "description": "Тестовая конфигурация Syncthing внутри временного каталога."},
+        "nexusSync.mockSyncthingFolder": {"type": "string", "default": "", "scope": "machine", "description": "Тестовая папка Syncthing внутри временного каталога."},
+        "nexusSync.mockSyncthingId": {"type": "string", "default": "", "scope": "machine", "description": "ID тестовой папки Syncthing."},
+        "nexusSync.mockSyncthingPort": {"type": "integer", "default": 0, "minimum": 0, "maximum": 65535, "scope": "machine", "description": "Локальный порт API тестового Syncthing; 0 отключает проверку."},
+        "nexusSync.syncthingConfig": {"type": "string", "default": "", "scope": "machine", "description": "Необязательный путь к config.xml Syncthing для проверки источника; файл только читается."},
+        "nexusSync.syncthingProjectFolder": {"type": "string", "default": "", "scope": "machine", "description": "ID папки проектов Syncthing для проверки Send Only на источнике."},
+        "nexusSync.shared": {"type": "string", "default": "", "scope": "machine", "description": "Локальный путь к папке обмена Syncthing."},
+        "nexusSync.machine": {"type": "string", "default": "", "scope": "machine", "description": "Постоянный идентификатор этого устройства."},
+        "nexusSync.keyFile": {"type": "string", "default": "", "scope": "machine", "description": "Путь к локальному ключу для проверки подтверждений; сам ключ не передаётся в аргументах."}
+      }
+    }
+  }
+}

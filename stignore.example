@@ -1,0 +1,37 @@
+// Образец для тестовой папки, не активные правила Syncthing.
+// Проверьте на каждом устройстве до подключения рабочих данных.
+// Действуют правила Syncthing и порядок первого совпадения.
+.git
+.venv
+venv
+node_modules
+__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.tox
+.nox
+.dart_tool
+.pub-cache
+.flutter-sdk
+.gradle
+.cache
+// Метаданные файлового менеджера конкретной ОС.
+.DS_Store
+Thumbs.db
+desktop.ini
+// Секреты отдельно отправляются в зашифрованном пакете.
+// .env.example и другие .env.* тоже исключены: проверьте их вручную.
+// Добавляйте исключение ! для конкретного безопасного файла до правил ниже.
+(?i).env
+(?i).env.*
+(?i).npmrc
+(?i).pypirc
+(?i).netrc
+(?i).git-credentials
+(?i).pgpass
+(?i).htpasswd
+(?i)*.key
+(?i)*.pem
+(?i)*.p12
+// Не исключаем все data/, bin/, build/ и *.sqlite: они могут быть данными.
