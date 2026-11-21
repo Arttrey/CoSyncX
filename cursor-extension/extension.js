@@ -49,7 +49,7 @@ function activate(context) {
             }
             const labels = { TRANSFERRING: '$(sync~spin) CoSyncX: передача',
                 RESTORING: '$(sync~spin) CoSyncX: восстановление', PENDING: '$(warning) CoSyncX: ожидание',
-                COMPLETE: '$(check) CoSyncX: восстановлено', ERROR: '$(warning) CoSyncX: ошибка' };
+                COMPLETE: '$(check) CoSyncX: синхронизировано', ERROR: '$(warning) CoSyncX: ошибка' };
             item.text = labels[status.state];
             item.tooltip = 'Локальный статус CoSyncX';
             // An earlier successful restore may still need a reload even when

@@ -319,12 +319,12 @@ class DirectReceiver:
             mock_journal.ensure_clear(self.backup_root)
         except ns.SyncError:
             return None
-        try:
-            if not quiescence.is_quiet():
-                return None
-        except quiescence.QuiescenceError:
-            return None
         if prior is not None and prior.get('phase') == 'writing':
+            try:
+                if not quiescence.is_quiet():
+                    return None
+            except quiescence.QuiescenceError:
+                return None
             if not self._recover_interrupted(prior):
                 return None
             prior = None
@@ -602,6 +602,11 @@ class DirectReceiver:
             selection = dbs + ([index.name] if index.is_file() else [])
             selection += [path.relative_to(self.profile).as_posix() for _, path, _, _, _, _ in recheck]
             lock_id = prepared[0][0] if prepared else (recheck[0][0] if recheck else sorted(graph_changed)[0])
+            try:
+                if not quiescence.is_quiet():
+                    return None
+            except quiescence.QuiescenceError:
+                return None
             with locking._mock_thread_lock(self.profile, lock_id):
                 if not quiescence.is_quiet():
                     return None

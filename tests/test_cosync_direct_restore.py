@@ -63,6 +63,16 @@ class DirectRestoreTests(unittest.TestCase):
             self.assertEqual(protected_path.read_bytes(), before)
             self.assertFalse((local / f'rollout-2026-01-01T00-00-00-{child}.jsonl').exists())
             self.assertTrue((local / f'rollout-2026-01-01T00-00-00-{other}.jsonl').exists())
+            empty_backups = root / 'empty-backups'
+            empty_backups.mkdir(mode=0o700)
+            read_only = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
+                backup_root=empty_backups, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
+                codex=Path(sys.executable), folder_ids=('sessions', 'titles', 'graph'), peer_id='vps',
+                excluded_thread_ids=[protected, other])
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=False):
+                self.assertEqual(read_only._receive(), 0)
+            self.assertEqual(protected_path.read_bytes(), before)
+            self.assertFalse((empty_backups / 'latest').exists())
 
     def test_source_change_after_indexing_is_reconciled_before_reload(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-source-change-') as tmp:

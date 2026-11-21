@@ -46,7 +46,7 @@ const waitFor = async predicate => {
         extension.activate(context);
         await waitFor(() => calls.length === 1);
         assert.deepStrictEqual(calls, ['workbench.action.reloadWindow']);
-        assert.strictEqual(statusItem.text, '$(check) CoSyncX: восстановлено');
+        assert.strictEqual(statusItem.text, '$(check) CoSyncX: синхронизировано');
         refresh();
         await new Promise(resolve => setTimeout(resolve, 50));
         assert.strictEqual(calls.length, 1);
