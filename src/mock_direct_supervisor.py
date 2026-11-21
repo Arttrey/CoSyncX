@@ -6,52 +6,17 @@ import threading
 
 import cosync_engine
 import cosync_restore_status
+import cosync_restore_supervisor
 import cosync_syncthing_watch
 import mock_chat_sync as mock
 from mock_direct_receiver import MockDirectReceiver
 import nexus_sync as ns
 
 
-class MockSupervisor:
+class MockSupervisor(cosync_restore_supervisor.RestoreSupervisor):
     def __init__(self, receiver, chat_reader, status_file: Path, *, title_reader=None, graph_reader=None):
-        self.receiver, self.chat_reader, self.title_reader = receiver, chat_reader, title_reader
-        self.graph_reader = graph_reader
-        self.status_file = mock._mock_path(status_file)
-        previous = cosync_restore_status.read_status(self.status_file, mock_only=True, max_age_ms=None)
-        self.last_event = previous.get('restore_event') if previous else None
-
-    def _publish(self, state):
-        cosync_restore_status.write_status(self.status_file, state, mock_only=True, event=self.last_event)
-
-    def tick(self):
-        try:
-            result = self.receiver.poll(self.chat_reader, title_status_reader=self.title_reader,
-                                        graph_status_reader=self.graph_reader,
-                                        on_restore=lambda: self._publish('RESTORING'))
-            state = result.get('state')
-            if state == 'COMPLETE':
-                if result.get('restore_event') is not None:
-                    self.last_event = result['restore_event']
-                self._publish('COMPLETE')
-            elif state == 'CURRENT':
-                self._publish('COMPLETE')
-            else:
-                self._publish('PENDING')
-            return result
-        except (ns.SyncError, cosync_engine.EngineError, cosync_syncthing_watch.WatchError,
-                cosync_restore_status.StatusError, OSError, ValueError, TypeError):
-            try:
-                self._publish('ERROR')
-            except (cosync_restore_status.StatusError, OSError, ValueError):
-                pass
-            return {'state': 'ERROR', 'mock_only': True}
-
-    def run(self, stop: threading.Event, interval: float):
-        if not 0.2 <= interval <= 60:
-            raise ValueError('Invalid mock polling interval')
-        while not stop.is_set():
-            self.tick()
-            stop.wait(interval)
+        super().__init__(receiver, chat_reader, mock._mock_path(status_file), mock_only=True,
+                         title_reader=title_reader, graph_reader=graph_reader)
 
 
 def main(argv=None):
