@@ -35,6 +35,8 @@ class TitleRelayTests(unittest.TestCase):
             (source / 'sessions' / 'rollout.jsonl').write_text('SYNTHETIC_CHAT_MUST_NOT_TRANSFER')
             record = {'id': '019b0000-0000-7000-8000-000000000001', 'thread_name': 'synthetic private title',
                       'updated_at': '2026-01-01T00:00:00Z'}
+            # Exercise a file spanning many encryption chunks, not just a tiny record.
+            record['thread_name'] *= 1500
             (source / 'session_index.jsonl').write_text(json.dumps(record) + '\n')
             homes = [root / 'sender-engine', root / 'relay-engine', root / 'receiver-engine']
             clients, processes, keys = [], [], []
