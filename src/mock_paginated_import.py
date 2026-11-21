@@ -445,6 +445,11 @@ def reset_mock_projection(profile: Path, shared: Path, backup_root: Path, key: b
     shared, backup_root = mock._mock_path(shared), mock._mock_path(backup_root)
     if not shared.is_dir() or not backup_root.is_dir():
         raise ns.SyncError('Mock projection folders unavailable')
+    _reset_profile_projection(profile, backup_root, thread_id)
+
+
+def _reset_profile_projection(profile: Path, backup_root: Path, thread_id: str) -> None:
+    """Reset one verified projection after the caller has guarded and backed up the profile."""
     database = profile / 'thread_history_1.sqlite'
     latest = backup_root / 'latest'
     if database.is_symlink() or not database.is_file() or latest.is_symlink():

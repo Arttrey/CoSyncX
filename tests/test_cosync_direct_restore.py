@@ -35,7 +35,7 @@ class DirectRestoreTests(unittest.TestCase):
             (graph / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1', 'edges': [],
                 'omitted_missing': 0, 'omitted_archived': 0}))
             with sqlite3.connect(profile / 'state_5.sqlite') as db:
-                db.execute('CREATE TABLE threads (id TEXT)')
+                db.execute('CREATE TABLE threads (id TEXT, archived INTEGER)')
             receiver = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
                 backup_root=backups, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
                 codex=Path(sys.executable), folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0)
@@ -59,7 +59,7 @@ class DirectRestoreTests(unittest.TestCase):
             self.assertFalse((profile / 'sessions').exists())
             graph_path.write_bytes(empty_graph)
             with sqlite3.connect(profile / 'state_5.sqlite') as db:
-                db.execute('INSERT INTO threads VALUES (?)', (thread,))
+                db.execute('INSERT INTO threads VALUES (?, 0)', (thread,))
             with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True):
                 self.assertEqual(poll(3)['state'], 'PENDING')
             self.assertFalse((backups / 'latest').exists())
@@ -109,6 +109,44 @@ class DirectRestoreTests(unittest.TestCase):
             self.assertEqual(supervisor.tick()['state'], 'COMPLETE')
             self.assertEqual(json.loads(status_path.read_text())['restore_event']['id'], result['restore_event']['id'])
             self.assertFalse(journal.exists())
+            # A restarted watcher can verify an existing, locally extended
+            # history without replacing it or requesting a window reload.
+            (profile / 'session_index.jsonl').write_text(json.dumps({'id': thread, 'thread_name': 'test'}) + '\n')
+            local = profile / history.relative_to(source)
+            with local.open('a') as stream:
+                stream.write(json.dumps({'timestamp': '2026-01-01T00:00:01.000Z', 'type': 'event_msg',
+                    'ordinal': 1, 'payload': {'type': 'agent_message', 'message': 'local continuation'}}) + '\n')
+            local_before = local.read_bytes()
+            existing = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
+                backup_root=backups, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
+                codex=Path(sys.executable), folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0)
+            supervisor = RestoreSupervisor(existing, readers[0], status_path, mock_only=False,
+                                           title_reader=readers[1], graph_reader=readers[2])
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True), \
+                    patch('cosync_direct_restore.indexer._index_profile') as verify_existing:
+                self.assertEqual(supervisor.tick()['state'], 'WAITING')
+                no_change = supervisor.tick()
+            self.assertEqual(no_change['state'], 'COMPLETE')
+            self.assertIsNone(no_change['restore_event'])
+            verify_existing.assert_called_once()
+            self.assertEqual(local.read_bytes(), local_before)
+            self.assertFalse(journal.exists())
+            with history.open('a') as stream:
+                stream.write(json.dumps({'timestamp': '2026-01-01T00:00:01.000Z', 'type': 'event_msg',
+                    'ordinal': 1, 'payload': {'type': 'agent_message', 'message': 'different remote continuation'}}) + '\n')
+            with sqlite3.connect(profile / 'thread_history_1.sqlite') as db:
+                db.execute('CREATE TABLE example (id INTEGER)')
+            conflicting = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
+                backup_root=backups, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
+                codex=Path(sys.executable), folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0)
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True), \
+                    patch('cosync_direct_restore.indexer._index_profile') as indexed_update, \
+                    patch('cosync_direct_restore.indexer._reset_profile_projection') as reset_projection:
+                self.assertEqual(conflicting._receive(), 1)
+            indexed_update.assert_called_once()
+            reset_projection.assert_called_once()
+            self.assertIn(b'different remote continuation', local.read_bytes())
+            self.assertEqual((backups / 'latest' / local.relative_to(profile)).read_bytes(), local_before)
 
     @unittest.skipUnless(os.environ.get('NEXUS_TEST_CODEX') == '1' and shutil.which('codex'), 'requires disposable Codex')
     def test_real_codex_indexes_new_direct_chat_in_disposable_profile(self):
@@ -129,7 +167,11 @@ class DirectRestoreTests(unittest.TestCase):
                     {'timestamp': '2026-01-01T00:00:01.000Z', 'type': 'response_item', 'payload':
                      {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'received message'}]}},
                     {'timestamp': '2026-01-01T00:00:01.001Z', 'type': 'event_msg', 'payload':
-                     {'type': 'user_message', 'message': 'received message', 'images': [], 'local_images': [], 'text_elements': []}}]
+                     {'type': 'user_message', 'message': 'received message', 'images': [], 'local_images': [], 'text_elements': []}},
+                    {'timestamp': '2026-01-01T00:00:02.000Z', 'type': 'response_item', 'payload':
+                     {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'later source message'}]}},
+                    {'timestamp': '2026-01-01T00:00:02.001Z', 'type': 'event_msg', 'payload':
+                     {'type': 'user_message', 'message': 'later source message', 'images': [], 'local_images': [], 'text_elements': []}}]
             history.write_text(''.join(json.dumps(row) + '\n' for row in rows))
             (titles / 'session_index.jsonl').write_text(json.dumps({'id': thread, 'thread_name': 'Received'}) + '\n')
             (graph / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1', 'edges': [],
@@ -138,6 +180,12 @@ class DirectRestoreTests(unittest.TestCase):
             migrated = subprocess.run([codex, 'migrate-rollouts', '--apply', '--json'],
                 env={**os.environ, 'CODEX_HOME': str(source)}, capture_output=True, timeout=30)
             self.assertEqual(migrated.returncode, 0)
+            first, later = [], []
+            for line in history.read_text().splitlines(keepends=True):
+                row = json.loads(line)
+                (later if row.get('timestamp', '') >= '2026-01-01T00:00:02' else first).append(line)
+            self.assertTrue(later)
+            history.write_text(''.join(first))
             server = subprocess.Popen([codex, 'app-server', '--listen', 'stdio://'], stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0,
                 env={**os.environ, 'CODEX_HOME': str(profile)})
@@ -159,7 +207,34 @@ class DirectRestoreTests(unittest.TestCase):
             with sqlite3.connect(profile / 'state_5.sqlite') as db:
                 row = db.execute('SELECT archived FROM threads WHERE id=?', (thread,)).fetchone()
             self.assertEqual(row, (0,))
-            self.assertTrue((backups / 'direct-restore-pending.json').is_file())
+            journal = backups / 'direct-restore-pending.json'
+            self.assertTrue(journal.is_file())
+            event_id = json.loads(journal.read_text())['event_id']
+            receiver.acknowledge({'id': event_id, 'indexed': True, 'changed_chats': 1})
+            target = profile / history.relative_to(source)
+            original = target.read_bytes()
+            existing = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
+                backup_root=backups, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
+                codex=Path(codex), folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0)
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True):
+                self.assertEqual(existing._receive(), 0)
+            self.assertEqual(target.read_bytes(), original)
+            self.assertTrue(journal.is_file())
+            existing.acknowledge(None)
+            self.assertFalse(journal.exists())
+            with target.open('a') as out:
+                for line in later:
+                    out.write(line.replace('later source message', 'different local message'))
+            divergent_local = target.read_bytes()
+            with history.open('a') as out:
+                out.writelines(later)
+            updated = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
+                backup_root=backups, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
+                codex=Path(codex), folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0)
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True):
+                self.assertEqual(updated._receive(), 1)
+            self.assertIn(b'later source message', target.read_bytes())
+            self.assertEqual((backups / 'latest' / target.relative_to(profile)).read_bytes(), divergent_local)
 
 
 if __name__ == '__main__':

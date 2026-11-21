@@ -39,7 +39,8 @@ class RestoreSupervisor:
                         raise ValueError('Invalid restore confirmation')
                     self.last_event = event
                 self._publish('COMPLETE')
-                if event is not None and callable(getattr(self.receiver, 'acknowledge', None)):
+                if ((event is not None or result.get('acknowledge_required') is True)
+                        and callable(getattr(self.receiver, 'acknowledge', None))):
                     self.receiver.acknowledge(event)
             elif state == 'CURRENT':
                 if event is not None:

@@ -22,9 +22,10 @@ not persist a remote sequence alone across Syncthing index resets.
 The direct-folder pipeline is currently limited to disposable mock profiles;
 it does not receive real chats. The optional macOS menu-bar status is read-only
 and reports Syncthing transfer progress, not successful restoration.
-The `direct-watch --experimental` prototype handles previously absent single-page
-chats only when Cursor and Codex are quiet. It defers existing and archived IDs,
-nonempty relationship graphs, multi-page histories and missing-path reports.
+The `direct-watch --experimental` prototype handles single-page new and active
+chats when Cursor and Codex are quiet. A differing source history or title is
+applied after backing up the local state. It defers archived IDs, nonempty
+relationship graphs, multi-page histories and missing-path reports.
 An indexed restore keeps its reload event until the status is published, but an
 interrupted write still requires manual recovery. The watcher is not installed
 or enabled automatically and must not be used on a real profile yet.

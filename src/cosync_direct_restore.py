@@ -1,7 +1,8 @@
 """Guarded direct-folder receiver for previously absent, single-page chats.
 
-Existing or archived IDs, multi-page histories, graphs and unavailable paths
-are left pending. No profile write is attempted while Codex or Cursor runs.
+Archived IDs, graphs and unavailable paths are left pending. Existing active
+versions are backed up before replacement. No profile write is attempted
+while Codex or Cursor runs.
 """
 import argparse
 import json
@@ -49,7 +50,7 @@ class DirectReceiver:
         self.gate = cosync_auto_gate.MultiFolderGate(folder_ids=folder_ids, peer_id=peer_id,
                                                      quiet_seconds=quiet_seconds)
         self.verified = {}
-        self.pending_event = None
+        self.pending_result = None
 
     def _read_journal(self):
         path = self.backup_root / 'direct-restore-pending.json'
@@ -83,12 +84,14 @@ class DirectReceiver:
 
     def acknowledge(self, event):
         record = self._read_journal()
-        if (not record or record.get('phase') != 'indexed' or not isinstance(event, dict)
-                or event.get('id') != record.get('event_id') or event.get('indexed') is not True
-                or event.get('changed_chats') != len(record.get('threads', []))):
+        changed = len(record.get('threads', [])) if record else -1
+        if (not record or record.get('phase') != 'indexed' or
+                (changed == 0 and event is not None) or
+                (changed > 0 and (not isinstance(event, dict) or event.get('id') != record.get('event_id')
+                 or event.get('indexed') is not True or event.get('changed_chats') != changed))):
             raise ns.SyncError('Direct restore acknowledgement mismatch')
         (self.backup_root / 'direct-restore-pending.json').unlink()
-        self.pending_event = None
+        self.pending_result = None
 
     def _receive(self) -> int | None:
         journal = self.backup_root / 'direct-restore-pending.json'
@@ -147,7 +150,7 @@ class DirectReceiver:
                     or prior.get('graph_digest') != hashlib.sha256(graph_bytes).hexdigest()
                     or not isinstance(prior.get('verified'), dict)
                     or set(prior['verified']) != set(fingerprints)
-                    or not isinstance(prior.get('threads'), list) or not prior['threads']
+                    or not isinstance(prior.get('threads'), list)
                     or not set(prior['threads']) <= set(fingerprints)
                     or not isinstance(prior.get('event_id'), str) or len(prior['event_id']) != 32):
                 return None
@@ -168,6 +171,10 @@ class DirectReceiver:
             return len(prior['threads'])
         with tempfile.TemporaryDirectory(prefix='cosyncx-direct-prepare-') as temp:
             prepared = []
+            recheck = []
+            local_titles_data = ns._read_title_index(self.profile)
+            local_titles = ({entry['id']: entry['thread_name'] for entry in ns._parse_title_index(local_titles_data)}
+                            if local_titles_data is not None else {})
             for number, (identity, entries) in enumerate(sorted(incoming.items())):
                 if len(entries) != 1 or kinds[identity] not in ('chat', 'subagent'):
                     return None
@@ -183,17 +190,21 @@ class DirectReceiver:
                     if len(current) != 1 or current[0]['folder'] != 'sessions':
                         return None
                     expected_title = names.get(identity) if kinds[identity] == 'chat' else None
-                    if self.verified.get(identity) != (ns._digest(current[0]['path']), expected_title):
-                        return None
                     target = self.mappings[0][1]
-                    if ns._path_adjusted_relation(staged[0]['path'], current[0]['path'], target, target) not in (
-                            'EQUIVALENT_AFTER_PATH_MAPPING', 'LOCAL_EXTENDS_AFTER_PATH_MAPPING'):
+                    relation = ns._path_adjusted_relation(staged[0]['path'], current[0]['path'], target, target)
+                    if relation not in ('EQUIVALENT_AFTER_PATH_MAPPING', 'LOCAL_EXTENDS_AFTER_PATH_MAPPING',
+                                        'INCOMING_EXTENDS_AFTER_PATH_MAPPING', 'DIVERGED'):
                         return None
+                    replacement = staged[0]['path'] if relation in ('INCOMING_EXTENDS_AFTER_PATH_MAPPING', 'DIVERGED') else None
+                    title_changed = expected_title is not None and local_titles.get(identity) != expected_title
+                    current_digest = ns._digest(current[0]['path'])
+                    if replacement is not None or title_changed or self.verified.get(identity) != (current_digest, expected_title):
+                        recheck.append((identity, current[0]['path'], expected_title, current_digest, replacement, title_changed))
                     continue
                 relative = staged[0]['path'].relative_to(stage)
                 prepared.append((identity, staged[0]['path'], relative,
                                  names.get(identity) if kinds[identity] == 'chat' else None))
-            if not prepared:
+            if not prepared and not recheck:
                 return 0
             prepared.sort(key=lambda entry: (kinds[entry[0]] != 'chat', entry[0]))
             db_paths = {p for pattern in ('state_*.sqlite', 'thread_history_*.sqlite')
@@ -202,6 +213,8 @@ class DirectReceiver:
                 return None
             dbs = sorted(p.name for p in db_paths)
             if 'state_5.sqlite' not in dbs:
+                return None
+            if any(replacement is not None for _, _, _, _, replacement, _ in recheck) and 'thread_history_1.sqlite' not in dbs:
                 return None
             try:
                 with sqlite3.connect((self.profile / 'state_5.sqlite').as_uri() + '?mode=ro', uri=True) as db:
@@ -214,7 +227,9 @@ class DirectReceiver:
             if index.is_symlink() or (index.exists() and not index.is_file()):
                 return None
             selection = dbs + ([index.name] if index.is_file() else [])
-            with locking._mock_thread_lock(self.profile, prepared[0][0]):
+            selection += [path.relative_to(self.profile).as_posix() for _, path, _, _, _, _ in recheck]
+            lock_id = prepared[0][0] if prepared else recheck[0][0]
+            with locking._mock_thread_lock(self.profile, lock_id):
                 if not quiescence.is_quiet():
                     return None
                 current_ids = ns._chat_catalog(self.profile, include_unsupported=True)
@@ -224,10 +239,24 @@ class DirectReceiver:
                     for identity, _, _, _ in prepared:
                         if db.execute('SELECT 1 FROM threads WHERE id=? LIMIT 1', (identity,)).fetchone():
                             return None
-                latest = backup.replace_latest(self.profile, self.backup_root, selection)
+                    for identity, _, _, _, _, _ in recheck:
+                        state = db.execute('SELECT archived FROM threads WHERE id=?', (identity,)).fetchone()
+                        if state is not None and state != (0,):
+                            return None
+                def verify_backup(_stage, manifest):
+                    for _, path, _, digest, _, _ in recheck:
+                        relative = path.relative_to(self.profile).as_posix()
+                        if ns._digest(path) != digest or manifest.get(relative) != digest:
+                            raise ns.SyncError('Direct history changed during backup')
+                latest = backup.replace_latest(self.profile, self.backup_root, selection, pre_commit=verify_backup)
+                changed = ([identity for identity, _, _, _ in prepared] +
+                           [identity for identity, _, _, _, replacement, title_changed in recheck
+                            if replacement is not None or title_changed])
                 record = {'version': 1, 'phase': 'writing', 'event_id': os.urandom(16).hex(),
-                          'threads': [identity for identity, _, _, _ in prepared],
-                          'paths': [relative.as_posix() for _, _, relative, _ in prepared],
+                          'threads': changed,
+                          'paths': ([relative.as_posix() for _, _, relative, _ in prepared] +
+                                    [path.relative_to(self.profile).as_posix() for _, path, _, _, replacement, _ in recheck
+                                     if replacement is not None]),
                           'backup_manifest_digest': ns._digest(latest / 'manifest.json'),
                           'source_fingerprints': fingerprints,
                           'title_digest': hashlib.sha256(title_bytes).hexdigest(),
@@ -253,12 +282,31 @@ class DirectReceiver:
                         os.link(temporary, target, follow_symlinks=False)
                     finally:
                         temporary.unlink(missing_ok=True)
+                for _, target, _, original_digest, replacement, _ in recheck:
+                    if replacement is None:
+                        continue
+                    if target.is_symlink() or not target.is_file() or ns._digest(target) != original_digest:
+                        raise ns.SyncError('Direct history changed after backup')
+                    temporary = target.with_name('.cosyncx-' + os.urandom(12).hex())
+                    try:
+                        ns._copy_stable_chat(replacement, temporary)
+                        os.replace(temporary, target)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+            for identity, _, _, _, replacement, _ in recheck:
+                if replacement is not None:
+                    if not quiescence.is_quiet():
+                        raise ns.SyncError('Codex started during direct restore')
+                    indexer._reset_profile_projection(self.profile, self.backup_root, identity)
             verified = {identity: {'digest': item[0], 'title': item[1]}
                         for identity, item in self.verified.items() if identity in incoming}
-            for identity, _, _, title in prepared:
+            to_index = [(identity, title) for identity, _, _, title in prepared]
+            to_index += [(identity, title) for identity, _, title, _, _, _ in recheck]
+            to_index.sort(key=lambda item: (kinds[item[0]] != 'chat', item[0]))
+            for identity, title in to_index:
                 if not quiescence.is_quiet():
                     raise ns.SyncError('Codex started during direct restore')
-                indexer._index_profile(self.profile, identity, self.codex, title=title)
+                indexer._index_profile(self.profile, identity, self.codex, title=title, allow_title_change=True)
                 current = ns._chat_catalog(self.profile, include_unsupported=True).get(identity, [])
                 if len(current) != 1:
                     raise ns.SyncError('Direct indexed history unavailable')
@@ -267,11 +315,11 @@ class DirectReceiver:
             record['verified'] = verified
             record['phase'] = 'indexed'
             self._write_journal(record)
-            return len(prepared)
+            return len(changed)
 
     def poll(self, chat_reader, *, title_status_reader=None, graph_status_reader=None, on_restore=None, now=None):
-        if self.pending_event is not None:
-            return {'state': 'COMPLETE', 'mock_only': False, 'restore_event': self.pending_event}
+        if self.pending_result is not None:
+            return self.pending_result
         if title_status_reader is None or graph_status_reader is None:
             return {'state': 'WAITING', 'mock_only': False}
         def observe():
@@ -297,8 +345,11 @@ class DirectReceiver:
             if not record or record.get('phase') != 'indexed':
                 raise ns.SyncError('Direct restore confirmation unavailable')
             event['id'] = record['event_id']
-            self.pending_event = event
-        return {'state': 'COMPLETE', 'mock_only': False, 'restore_event': event}
+        result = {'state': 'COMPLETE', 'mock_only': False, 'restore_event': event}
+        if record and record.get('phase') == 'indexed':
+            result['acknowledge_required'] = True
+            self.pending_result = result
+        return result
 
 
 def main(argv=None):
