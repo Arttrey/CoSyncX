@@ -229,6 +229,8 @@ def add_thread(source: Path, profile: Path, shared: Path, key: bytes,
     with tempfile.TemporaryDirectory(prefix='cosyncx-pages-') as temporary:
         prepared = Path(temporary).resolve() / 'prepared'
         count = lineage.prepare_lineage(source, prepared, thread_id, mappings)
+        if (prepared / 'cosyncx-path-report.json').exists():
+            raise ns.SyncError('Mock missing-path report needs delivery before adding a thread')
         files = [item['path'] for item in ns._chat_catalog(prepared, include_unsupported=True)[thread_id]]
         # The mock lock follows the Codex thread-writer protocol. No destination
         # is replaced; an interrupted batch is reported, not blindly retried.

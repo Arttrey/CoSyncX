@@ -55,6 +55,15 @@ class MockPaginatedImportTests(unittest.TestCase):
         self.assertEqual(expected[importer._text_tag('local_image', path)], 1)
         self.assertEqual(expected[importer._text_tag('user', 'synthetic')], 1)
 
+    def test_add_waits_if_unavailable_image_report_has_no_delivery(self):
+        with self.last.open('a', encoding='utf-8') as out:
+            out.write(json.dumps({'type': 'event_msg', 'ordinal': 3, 'payload': {'type': 'item_completed',
+                'item': {'type': 'UserMessage', 'content': [{'type': 'local_image', 'path': '/missing/image.png'}]}}}) + '\n')
+        with self.assertRaises(ns.SyncError):
+            importer.add_thread(self.source, self.profile, self.shared, self.key, self.thread,
+                                [('/source/Nexus', str(self.project))])
+        self.assertFalse((self.profile / 'sessions').exists())
+
     def test_adds_pages_and_refuses_existing_thread(self):
         self.assertEqual(importer.add_thread(self.source, self.profile, self.shared, self.key, self.thread,
                                              [('/source/Nexus', str(self.project))]), 2)

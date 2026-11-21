@@ -20,7 +20,7 @@ nexus-sync = "nexus_sync:main"
 [tool.setuptools]
 package-dir = {"" = "src"}
 packages = ["cosyncx_gui"]
-py-modules = ["nexus_sync", "cosyncx", "cosync_engine", "cosync_proxy", "cosync_vendor", "cosync_restore_backup", "cosync_restore_status", "cosync_auto_gate", "cosync_transfer_status", "cosync_receive_plan", "cosync_syncthing_watch", "cosync_quiescence", "cosync_graph_snapshot", "cosync_archive_plan", "cosync_title_snapshot", "cosync_extensions", "cosync_lineage", "mock_chat_preview", "mock_chat_sync", "mock_direct_receiver", "mock_direct_supervisor", "mock_paginated_import", "mock_graph_restore", "mock_archive_backup", "mock_archive_restore", "mock_journal", "mock_loopback_proxy", "mock_syncthing_status"]
+py-modules = ["nexus_sync", "cosyncx", "cosync_engine", "cosync_proxy", "cosync_vendor", "cosync_restore_backup", "cosync_restore_status", "cosync_auto_gate", "cosync_transfer_status", "cosync_receive_plan", "cosync_syncthing_watch", "cosync_quiescence", "cosync_graph_snapshot", "cosync_archive_plan", "cosync_title_snapshot", "cosync_extensions", "cosync_lineage", "mock_chat_preview", "mock_chat_sync", "mock_direct_receiver", "mock_direct_supervisor", "mock_paginated_import", "mock_graph_restore", "mock_archive_backup", "mock_archive_restore", "mock_child_batch", "mock_journal", "mock_loopback_proxy", "mock_syncthing_status"]
 
 [tool.setuptools.package-data]
 cosyncx_gui = ["LICENSE", "UPSTREAM.md", "default/index.html", "default/assets/css/*.css", "default/assets/lang/*.json"]

@@ -100,6 +100,18 @@ class MockDirectReceiver:
         incoming = {thread: entries for thread, entries in incoming.items() if kinds[thread] == 'chat'}
         if not incoming:
             return True
+        # The mock adapter has no report delivery; preflight each conversation
+        # before any title or history can be changed.
+        with tempfile.TemporaryDirectory(prefix='cosyncx-mock-path-check-') as temp:
+            for number, (thread, entries) in enumerate(incoming.items()):
+                prepared = Path(temp).resolve() / str(number)
+                mappings = [(self.source_root, str(self.target))]
+                if len(entries) == 1:
+                    pages_import.lineage.prepare_lineage(self.source, prepared, thread, mappings)
+                else:
+                    pages_import.prepare_flattened_mock(self.source, prepared, thread, mappings)
+                if (prepared / 'cosyncx-path-report.json').exists():
+                    return False
         multi = {thread: entries for thread, entries in incoming.items() if len(entries) > 1}
         local = ns._chat_catalog(self.profile, include_unsupported=True)
         local_titles = self._title_names()
@@ -117,6 +129,8 @@ class MockDirectReceiver:
                 prepared = Path(temp).resolve() / 'prepared'
                 pages_import.prepare_flattened_mock(self.source, prepared, thread,
                                                    [(self.source_root, str(self.target))])
+                if (prepared / 'cosyncx-path-report.json').exists():
+                    return False
                 checked = ns._chat_catalog(prepared, include_unsupported=True).get(thread, [])
                 if len(checked) != 1:
                     return False
