@@ -173,6 +173,9 @@ local Syncthing. See [engine and CLI documentation](docs/ENGINE.md). Installing
 the CLI does not start or configure either engine. A VPS can use Syncthing
 without running CoSyncX.
 
+For the planned Windows transition, see [Windows preparation](docs/WINDOWS.md).
+Automatic Codex profile restoration on Windows is not yet supported or verified.
+
 The optional `cursor-extension/` displays local experimental status; it does
 not verify that chats were imported or are visible in Cursor.
 
