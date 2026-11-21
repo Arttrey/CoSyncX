@@ -16,6 +16,36 @@ from test_codex_contract import read_rpc_response, stop_server
 
 
 class DirectRestoreTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform in ('linux', 'darwin'), 'requires Unix writer locks')
+    def test_busy_history_already_contained_does_not_stay_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source, titles, graph, profile, backups, project = (root / name for name in
+                ('source', 'titles', 'graph', 'profile', 'backups', 'project'))
+            for path in (source, titles, graph, profile, backups, project): path.mkdir(mode=0o700)
+            (source/'sessions').mkdir(); (profile/'sessions').mkdir()
+            identity = '019b0000-0000-7000-8000-0000000000d1'
+            name = f'rollout-2026-01-01T00-00-00-{identity}.jsonl'
+            meta = {'id':identity,'cwd':str(project),'source':'vscode','history_mode':'paginated'}
+            raw = json.dumps({'type':'session_meta','ordinal':0,'payload':meta})+'\n'
+            (source/'sessions'/name).write_text(raw)
+            (profile/'sessions'/name).write_text(raw + json.dumps({'type':'event_msg','ordinal':1,'payload':{}})+'\n')
+            (titles/'session_index.jsonl').write_text(json.dumps({'id':identity,'thread_name':'name'})+'\n')
+            (graph/'graph.json').write_text(json.dumps({'format':'cosyncx-active-graph-v1','edges':[],
+                                                       'omitted_missing':0,'omitted_archived':0}))
+            with sqlite3.connect(profile/'state_5.sqlite') as db:
+                db.execute('CREATE TABLE threads (id TEXT, archived INTEGER)')
+                db.execute('INSERT INTO threads VALUES (?,0)', (identity,))
+            receiver = DirectReceiver(source=source,titles=titles,graph=graph,profile=profile,backup_root=backups,
+                key=b'k'*32,mappings=[(str(project),str(project))],codex=Path(sys.executable),
+                folder_ids=('sessions','titles','graph'),peer_id='vps',allow_active=True)
+            with patch('cosync_direct_restore.locking._busy_thread_ids',return_value={identity}):
+                self.assertEqual(receiver._receive(),0)
+                self.assertEqual(receiver.pending_busy_ids,frozenset())
+                (source/'sessions'/name).write_text(raw + json.dumps({'type':'event_msg','ordinal':1,'payload':{'new':1}})+'\n')
+                self.assertEqual(receiver._receive(),0)
+                self.assertEqual(receiver.pending_busy_ids,frozenset({identity}))
+
     def test_completed_batch_notifies_when_new_transfer_arrives_during_indexing(self):
         from cosync_auto_gate import MultiFolderGate
         receiver = DirectReceiver.__new__(DirectReceiver)

@@ -632,12 +632,27 @@ class DirectReceiver:
         skipped.update(orphan_ids)
         self.pending_busy_ids = frozenset(orphan_ids | (graph_conflicts & set(incoming)))
         self._ignored_busy = frozenset()
+        def already_contained(identity):
+            source, target = incoming.get(identity, []), local.get(identity, [])
+            if len(source) != 1 or len(target) != 1 or target[0]['folder'] != 'sessions':
+                return False
+            try:
+                paths = (source[0]['path'], target[0]['path'])
+                def fingerprint(path):
+                    info = path.stat()
+                    return (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+                before = tuple(fingerprint(path) for path in paths)
+                contained = ns._is_prefix(*paths)
+                return contained and before == tuple(fingerprint(path) for path in paths)
+            except (OSError, ValueError, ns.SyncError):
+                return False
         if set(incoming) - skipped:
             try:
                 if self._write_allowed():
                     self._ignored_busy = frozenset(locking._busy_thread_ids(self.profile))
-                    self.pending_busy_ids |= frozenset((set(incoming) - skipped) & self._ignored_busy)
-                    skipped.update(self.pending_busy_ids)
+                    busy = (set(incoming) - skipped) & self._ignored_busy
+                    self.pending_busy_ids |= frozenset(identity for identity in busy if not already_contained(identity))
+                    skipped.update(busy)
             except (quiescence.QuiescenceError, locking.MockChatBusy, FileNotFoundError):
                 return None
         cached_ids, cached_fingerprints = (self._cached_unchanged(incoming, local, names, source_kinds, skipped)
@@ -696,7 +711,22 @@ class DirectReceiver:
                          if identity not in skipped and any(item.get('parent_thread_id') in skipped for item in entries)}
             if not dependent:
                 break
+            self.pending_busy_ids |= frozenset(identity for identity in dependent if not already_contained(identity))
             skipped.update(dependent)
+        # A skipped, already-contained child may still be waiting for its
+        # relationship to appear in the local index.
+        skipped_edges = [edge for edge in graph['edges'] if isinstance(edge, dict)
+                         and (edge.get('parent') in skipped or edge.get('child') in skipped)]
+        if skipped_edges:
+            try:
+                with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as db:
+                    for edge in skipped_edges:
+                        if (set(edge) != {'parent', 'child', 'status'} or
+                                db.execute('SELECT parent_thread_id, status FROM thread_spawn_edges WHERE child_thread_id=?',
+                                           (edge['child'],)).fetchone() != (edge['parent'], edge['status'])):
+                            self.pending_busy_ids |= frozenset((edge.get('child'),))
+            except (sqlite3.Error, OSError):
+                self.pending_busy_ids |= frozenset(edge.get('child') for edge in skipped_edges)
         incoming = {identity: entries for identity, entries in incoming.items() if identity not in skipped}
         kinds = {identity: source_kinds[identity] for identity in incoming}
         if any(kind not in ('chat', 'subagent') for kind in kinds.values()):
