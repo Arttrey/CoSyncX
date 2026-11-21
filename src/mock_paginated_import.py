@@ -465,7 +465,8 @@ def reset_mock_projection(profile: Path, shared: Path, backup_root: Path, key: b
 
 
 def index_thread(profile: Path, shared: Path, key: bytes, thread_id: str,
-                 executable: Path, *, title: str | None = None, allow_title_change: bool = False) -> None:
+                 executable: Path, *, title: str | None = None, allow_title_change: bool = False,
+                 on_verified=None) -> None:
     """Verify a complete mock thread through an isolated real Codex server."""
     profile = mock._validate_profile(profile, key)
     shared = mock._mock_path(shared)
@@ -536,6 +537,7 @@ def index_thread(profile: Path, shared: Path, key: bytes, thread_id: str,
                 if 'error' in response or 'result' not in response:
                     raise ns.SyncError('Mock Codex rejected index request')
                 return response['result']
+    verified = False
     try:
         call(1, 'initialize', {'clientInfo': {'name': 'cosyncx-mock', 'version': '0.1'},
                                 'capabilities': {'experimentalApi': True}})
@@ -595,6 +597,7 @@ def index_thread(profile: Path, shared: Path, key: bytes, thread_id: str,
             result = call(number, 'thread/read', {'threadId': thread_id, 'includeTurns': False})
             if not isinstance(result, dict) or not isinstance(result.get('thread'), dict) or result['thread'].get('id') != thread_id:
                 raise ns.SyncError('Mock subagent cannot be read')
+            verified = True
             return
         cursor, seen = None, set()
         while True:
@@ -609,6 +612,7 @@ def index_thread(profile: Path, shared: Path, key: bytes, thread_id: str,
                 if isinstance(item, dict) and item.get('id') == thread_id:
                     if title is not None and item.get('name') != title:
                         raise ns.SyncError('Mock title was not indexed')
+                    verified = True
                     return
             cursor = result['nextCursor']
             if cursor is None:
@@ -617,7 +621,10 @@ def index_thread(profile: Path, shared: Path, key: bytes, thread_id: str,
                 raise ns.SyncError('Invalid mock index cursor')
             seen.add(cursor)
     finally:
-        process.stdin.close()
+        try:
+            process.stdin.close()
+        except OSError:
+            pass
         try:
             process.wait(timeout=20)
         except subprocess.TimeoutExpired:
@@ -625,6 +632,8 @@ def index_thread(profile: Path, shared: Path, key: bytes, thread_id: str,
             process.wait(timeout=5)
             raise ns.SyncError('Mock Codex server did not stop')
         process.stdout.close()
+        if verified and on_verified is not None:
+            on_verified()
 
 
 def replace_mock_titles(profile: Path, shared: Path, backup_root: Path, key: bytes,

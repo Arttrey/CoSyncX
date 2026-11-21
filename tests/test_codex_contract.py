@@ -1151,6 +1151,10 @@ class CodexContractTests(unittest.TestCase):
             migration_home = root / 'migration-source'
             migration_rollout = migration_home / rollout.relative_to(home)
             migration_rollout.parent.mkdir(parents=True)
+            # Background plugin clones can outlive the disposable server and
+            # race TemporaryDirectory cleanup; they are unrelated to this test.
+            for isolated_home in (home, migration_home):
+                (isolated_home / 'config.toml').write_text('[features]\nplugins = false\nremote_plugin = false\n')
             rows = [{'timestamp': '2026-01-01T00:00:00.000Z', 'type': 'session_meta', 'payload':
                 {'id': thread_id, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': str(project),
                  'originator': 'codex_vscode', 'cli_version': '0.1.0', 'source': 'vscode', 'model_provider': 'openai'}}]

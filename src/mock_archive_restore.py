@@ -4,6 +4,7 @@ An interruption leaves a journal and requires review. This is not a live
 receiver and deliberately refuses multi-page sources and incoming descendants.
 """
 import json
+import hmac
 import os
 from pathlib import Path
 import queue
@@ -24,6 +25,33 @@ import mock_chat_sync as mock
 import mock_journal
 import mock_paginated_import as pages
 import nexus_sync as ns
+
+
+def _db_signatures(profile: Path, names: set[str]) -> dict:
+    result = {}
+    for name in sorted(names):
+        for path in (profile / name, profile / (name + '-wal')):
+            if path.is_symlink():
+                raise ns.SyncError('Mock database is a link')
+            if path.exists():
+                info = path.stat()
+                result[path.name] = [info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+            else:
+                result[path.name] = None
+    return result
+
+
+def _stable_digest(path: Path) -> str:
+    if path.is_symlink() or not path.is_file():
+        raise ns.SyncError('Mock verified file unavailable')
+    before = path.stat()
+    digest = ns._digest(path)
+    after = path.stat()
+    if ((before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            != (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            or ns._digest(path) != digest):
+        raise ns.SyncError('Mock verified file changed')
+    return digest
 
 
 def _change_archive(profile: Path, executable: Path, thread: str, method: str) -> None:
@@ -69,7 +97,10 @@ def _change_archive(profile: Path, executable: Path, thread: str, method: str) -
         call(2, method, {'threadId': thread})
     finally:
         if process.stdin is not None:
-            process.stdin.close()
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -123,42 +154,86 @@ def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: b
         saved = mock_archive_backup.prepare(profile, shared, backup_root, key, [thread])
         data = {'version': 1, 'thread': thread, 'source_digest': ns._digest(incoming[0]['path']),
                 'previous_files': impact['files'], 'previous_threads': sorted(impact['threads']),
-                'title_existed': saved['title_existed']}
+                'title_existed': saved['title_existed'],
+                'backup_manifest_digest': _stable_digest(backup_root / 'latest' / 'manifest.json')}
+        data['authentication'] = ns._manifest_tag(data, key)
         fd = os.open(journal, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
         with os.fdopen(fd, 'w', encoding='utf-8') as out:
             json.dump(data, out, sort_keys=True)
             out.flush()
             os.fsync(out.fileno())
-        _unarchive(profile, executable, thread)
-        for child in direct_children:
-            _archive(profile, executable, child)
-        after = cosync_archive_plan.archive_impact(profile, [thread])
-        if after['threads'] != impact['threads'] or not descendants <= after['archived_ids']:
-            raise ns.SyncError('Mock descendants did not return to archive')
-        current = ns._chat_catalog(profile, include_unsupported=True).get(thread, [])
-        active = [item for item in current if item['folder'] == 'sessions']
-        remaining = [item for item in current if item['folder'] == 'archived_sessions']
-        if len(active) != 1 or len(active) + len(remaining) != len(current):
-            raise ns.SyncError('Mock unarchive produced an unexpected state')
-        manifest = json.loads((backup_root / 'latest' / 'manifest.json').read_bytes())['files']
-        for item in remaining:
-            name = item['path'].relative_to(profile).as_posix()
-            if name not in impact['files'] or ns._digest(item['path']) != manifest.get(name):
-                raise ns.SyncError('Mock archived version changed after backup')
-        for item in remaining:
-            item['path'].unlink()
-        target = active[0]['path']
-        temporary = target.with_name('.cosyncx-archive-' + os.urandom(12).hex())
         try:
-            ns._copy_stable_chat(incoming[0]['path'], temporary)
-            if ns._digest(temporary) != data['source_digest']:
-                raise ns.SyncError('Mock incoming history changed after preparation')
-            os.replace(temporary, target)
-        finally:
-            temporary.unlink(missing_ok=True)
-        pages.reset_mock_projection(profile, shared, backup_root, key, thread)
-        pages.index_thread(profile, shared, key, thread, executable, title=title, allow_title_change=True)
-        journal.unlink()
+            _unarchive(profile, executable, thread)
+            for child in direct_children:
+                _archive(profile, executable, child)
+            after = cosync_archive_plan.archive_impact(profile, [thread])
+            if after['threads'] != impact['threads'] or not descendants <= after['archived_ids']:
+                raise ns.SyncError('Mock descendants did not return to archive')
+            current = ns._chat_catalog(profile, include_unsupported=True).get(thread, [])
+            active = [item for item in current if item['folder'] == 'sessions']
+            remaining = [item for item in current if item['folder'] == 'archived_sessions']
+            if len(active) != 1 or len(active) + len(remaining) != len(current):
+                raise ns.SyncError('Mock unarchive produced an unexpected state')
+            manifest_path = backup_root / 'latest' / 'manifest.json'
+            if _stable_digest(manifest_path) != data['backup_manifest_digest']:
+                raise ns.SyncError('Mock backup changed after preparation')
+            manifest = json.loads(manifest_path.read_bytes())['files']
+            for item in remaining:
+                name = item['path'].relative_to(profile).as_posix()
+                if name not in impact['files'] or ns._digest(item['path']) != manifest.get(name):
+                    raise ns.SyncError('Mock archived version changed after backup')
+            for item in remaining:
+                item['path'].unlink()
+            target = active[0]['path']
+            temporary = target.with_name('.cosyncx-archive-' + os.urandom(12).hex())
+            try:
+                ns._copy_stable_chat(incoming[0]['path'], temporary)
+                if ns._digest(temporary) != data['source_digest']:
+                    raise ns.SyncError('Mock incoming history changed after preparation')
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
+            pages.reset_mock_projection(profile, shared, backup_root, key, thread)
+            def mark_verified():
+                title_path = profile / 'session_index.jsonl'
+                if title_path.is_symlink() or (title_path.exists() and not title_path.is_file()):
+                    raise ns.SyncError('Mock verified title index unavailable')
+                manifest_path = backup_root / 'latest' / 'manifest.json'
+                if _stable_digest(manifest_path) != data['backup_manifest_digest']:
+                    raise ns.SyncError('Mock backup changed during indexing')
+                manifest = json.loads(manifest_path.read_bytes())
+                db_names = {name for name in manifest['files'] if re.fullmatch(r'(?:state|thread_history)_\d+\.sqlite', name)}
+                data.update({'verified_digest': _stable_digest(target),
+                             'verified_title_existed': title_path.is_file(),
+                             'verified_title_digest': _stable_digest(title_path) if title_path.is_file() else None,
+                             'verified_db_signatures': _db_signatures(profile, db_names)})
+                data['authentication'] = ns._manifest_tag(data, key)
+                fd, name = tempfile.mkstemp(prefix='.mock-archive-journal-', dir=backup_root)
+                temporary_journal = Path(name)
+                try:
+                    if hasattr(os, 'fchmod'):
+                        os.fchmod(fd, 0o600)
+                    with os.fdopen(fd, 'w', encoding='utf-8') as out:
+                        json.dump(data, out, sort_keys=True)
+                        out.flush()
+                        os.fsync(out.fileno())
+                    if journal.is_symlink() or not journal.is_file():
+                        raise ns.SyncError('Mock archive journal unavailable')
+                    os.replace(temporary_journal, journal)
+                finally:
+                    temporary_journal.unlink(missing_ok=True)
+            pages.index_thread(profile, shared, key, thread, executable, title=title,
+                               allow_title_change=True, on_verified=mark_verified)
+            journal.unlink()
+        except Exception as exc:
+            # A subprocess timeout may mean our own Codex process still uses
+            # the mock profile; do not attempt rollback until it is stopped.
+            if not isinstance(exc, subprocess.SubprocessError):
+                try:
+                    rollback(profile, shared, backup_root, key)
+                except Exception:
+                    pass  # The authenticated journal remains for review.
+            raise
 
 
 def rollback(profile: Path, shared: Path, backup_root: Path, key: bytes) -> None:
@@ -185,6 +260,8 @@ def rollback(profile: Path, shared: Path, backup_root: Path, key: bytes) -> None
             or not isinstance(data.get('thread'), str)
             or not isinstance(data.get('source_digest'), str)
             or re.fullmatch(r'[0-9a-f]{64}', data['source_digest']) is None
+            or not isinstance(data.get('backup_manifest_digest'), str)
+            or re.fullmatch(r'[0-9a-f]{64}', data['backup_manifest_digest']) is None
             or type(data.get('title_existed')) is not bool
             or not isinstance(data.get('previous_files'), list) or not data['previous_files']
             or not isinstance(data.get('previous_threads'), list) or not data['previous_threads']
@@ -192,6 +269,21 @@ def rollback(profile: Path, shared: Path, backup_root: Path, key: bytes) -> None
             or not isinstance(manifest, dict) or manifest.get('version') != 1
             or not isinstance(manifest.get('files'), dict)):
         raise ns.SyncError('Invalid mock archive recovery data')
+    tag = data.get('authentication')
+    if not isinstance(tag, str) or not hmac.compare_digest(tag, ns._manifest_tag(data, key)):
+        raise ns.SyncError('Mock archive journal is not authenticated')
+    if _stable_digest(manifest_path) != data['backup_manifest_digest']:
+        raise ns.SyncError('Mock archive backup manifest changed')
+    verified_keys = {'verified_digest', 'verified_title_existed', 'verified_title_digest', 'verified_db_signatures'}
+    has_verified = bool(verified_keys & set(data))
+    if has_verified and (not verified_keys <= set(data)
+            or not isinstance(data['verified_digest'], str) or re.fullmatch(r'[0-9a-f]{64}', data['verified_digest']) is None
+            or type(data['verified_title_existed']) is not bool
+            or (data['verified_title_existed'] and (not isinstance(data['verified_title_digest'], str)
+                or re.fullmatch(r'[0-9a-f]{64}', data['verified_title_digest']) is None))
+            or (not data['verified_title_existed'] and data['verified_title_digest'] is not None)
+            or not isinstance(data['verified_db_signatures'], dict)):
+        raise ns.SyncError('Invalid verified mock state')
     thread, names, entries = data['thread'], data['previous_files'], manifest['files']
     if (any(not isinstance(x, str) or not x.startswith('archived_sessions/') for x in names)
             or len(set(names)) != len(names) or not set(names) <= set(entries)):
@@ -219,6 +311,8 @@ def rollback(profile: Path, shared: Path, backup_root: Path, key: bytes) -> None
             allowed = {entries[x['path'].relative_to(latest).as_posix()] for x in catalog[identity]}
             if identity == thread:
                 allowed.add(data['source_digest'])
+                if has_verified:
+                    allowed.add(data['verified_digest'])
             items = live_catalog.get(identity, [])
             if any(ns._digest(item['path']) not in allowed for item in items):
                 raise ns.SyncError('Mock history changed after interruption')
@@ -236,12 +330,18 @@ def rollback(profile: Path, shared: Path, backup_root: Path, key: bytes) -> None
         live_db = {path.name for pattern in ('state_*.sqlite', 'thread_history_*.sqlite') for path in profile.glob(pattern)}
         if 'state_5.sqlite' not in db_names or db_names != live_db:
             raise ns.SyncError('Mock database set changed after interruption')
+        if has_verified and _db_signatures(profile, db_names) != data['verified_db_signatures']:
+            raise ns.SyncError('Mock databases changed after verified indexing')
         title = profile / 'session_index.jsonl'
         if (title.is_symlink() or (title.exists() and not title.is_file())
-                or (not data['title_existed'] and title.exists())
                 or data['title_existed'] != ('session_index.jsonl' in entries)):
             raise ns.SyncError('Mock title state changed after interruption')
-        if data['title_existed'] and (not title.is_file() or ns._digest(title) != entries['session_index.jsonl']):
+        if has_verified:
+            if (title.is_file() != data['verified_title_existed']
+                    or (title.is_file() and _stable_digest(title) != data['verified_title_digest'])):
+                raise ns.SyncError('Mock title changed after verified indexing')
+        elif (not data['title_existed'] and title.exists()) or (data['title_existed'] and
+                (not title.is_file() or ns._digest(title) != entries['session_index.jsonl'])):
             raise ns.SyncError('Mock title changed after interruption')
         for name in db_names:
             target = profile / name
@@ -278,6 +378,8 @@ def rollback(profile: Path, shared: Path, backup_root: Path, key: bytes) -> None
             copy_saved(name, target)
         if data['title_existed']:
             copy_saved('session_index.jsonl', title)
+        elif has_verified and title.is_file():
+            title.unlink()
         for name in sorted(db_names):
             with sqlite3.connect(saved[name].as_uri() + '?mode=ro', uri=True) as source_db:
                 with sqlite3.connect(profile / name, timeout=1) as destination_db:
