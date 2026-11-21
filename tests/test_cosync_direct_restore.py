@@ -563,14 +563,19 @@ class DirectRestoreTests(unittest.TestCase):
                     patch('cosync_direct_restore.indexer._index_profile', side_effect=ns.SyncError('interrupted')):
                 with self.assertRaises(ns.SyncError):
                     receiver._receive()
+            journal = backups / 'direct-restore-pending.json'
+            event_id = json.loads(journal.read_text())['event_id']
+            # A new Syncthing metadata revision must not strand the previous
+            # indexing pass, even when the source changes before it finishes.
+            with (graph / 'graph.json').open('a') as output:
+                output.write('\n')
             with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True):
-                self.assertEqual(receiver._receive(), 1)
+                self.assertEqual(receiver._receive(), 0)
             with sqlite3.connect(profile / 'state_5.sqlite') as db:
                 row = db.execute('SELECT archived FROM threads WHERE id=?', (thread,)).fetchone()
             self.assertEqual(row, (0,))
-            journal = backups / 'direct-restore-pending.json'
-            self.assertTrue(journal.is_file())
-            event_id = json.loads(journal.read_text())['event_id']
+            self.assertFalse(journal.exists())
+            self.assertEqual(receiver._read_carry(), [{'id': event_id, 'count': 1}])
             receiver.acknowledge({'id': event_id, 'indexed': True, 'changed_chats': 1})
             target = profile / history.relative_to(source)
             original = target.read_bytes()

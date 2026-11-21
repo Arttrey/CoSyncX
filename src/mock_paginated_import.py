@@ -5,6 +5,7 @@ system temporary directory and deliberately refuses existing thread IDs.
 """
 from pathlib import Path
 from collections import Counter
+from contextlib import closing
 import hashlib
 import hmac
 import json
@@ -490,7 +491,7 @@ def _reset_profile_projection(profile: Path, backup_root: Path, thread_id: str) 
         'thread_realtime_items': {'thread_id', 'item_id', 'rollout_ordinal', 'created_at_ms', 'item_type', 'item_json'},
     }
     with mock._mock_thread_lock(profile, thread_id):
-        with sqlite3.connect(database, timeout=1) as db:
+        with closing(sqlite3.connect(database, timeout=1)) as db, db:
             db.execute('BEGIN IMMEDIATE')
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
             if tables != set(expected) | {'_sqlx_migrations'}:
