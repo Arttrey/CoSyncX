@@ -54,6 +54,25 @@ class BackupRotationTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(backup.BackupError):
                 backup.replace_latest(self.profile, self.backups, [name])
 
+    def test_final_verification_failure_preserves_previous_backup(self):
+        backup.replace_latest(self.profile, self.backups, ['sessions/chat.jsonl'])
+        self.chat.write_text('changed\n')
+        def fail(_stage, _manifest):
+            raise backup.BackupError('source changed')
+        with self.assertRaises(backup.BackupError):
+            backup.replace_latest(self.profile, self.backups, ['sessions/chat.jsonl'], pre_commit=fail)
+        self.assertEqual((self.backups / 'latest/sessions/chat.jsonl').read_text(), 'first\n')
+        self.assertEqual([p.name for p in self.backups.iterdir()], ['latest'])
+
+    def test_callback_cannot_change_backup_manifest(self):
+        backup.replace_latest(self.profile, self.backups, ['sessions/chat.jsonl'])
+        self.chat.write_text('changed\n')
+        def corrupt(stage, _manifest):
+            (stage / 'manifest.json').write_text('{}')
+        with self.assertRaises(backup.BackupError):
+            backup.replace_latest(self.profile, self.backups, ['sessions/chat.jsonl'], pre_commit=corrupt)
+        self.assertEqual((self.backups / 'latest/sessions/chat.jsonl').read_text(), 'first\n')
+
 
 if __name__ == '__main__':
     unittest.main()

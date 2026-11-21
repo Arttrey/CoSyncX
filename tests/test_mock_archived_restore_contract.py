@@ -7,12 +7,15 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import cosync_lineage
 import cosync_archive_plan
 import cosync_restore_backup
 import mock_chat_sync
 import mock_paginated_import
+import mock_archive_backup
+import nexus_sync
 from test_codex_contract import read_rpc_response, stop_server
 
 
@@ -22,8 +25,13 @@ class ArchivedRestoreContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='cosyncx-archive-tree-') as tmp:
             root = Path(tmp).resolve()
             profile, project = root / 'profile', root / 'Nexus'
+            shared, backups = root / 'shared', root / 'backups'
+            shared.mkdir()
+            backups.mkdir()
+            key = b'k' * 32
+            mock_chat_sync.init_mock_profile(profile, key, shared)
             sessions = profile / 'sessions'
-            sessions.mkdir(parents=True)
+            sessions.mkdir()
             project.mkdir()
             parent = '019b0000-0000-7000-8000-000000000001'
             child = '019b0000-0000-7000-8000-000000000002'
@@ -78,6 +86,28 @@ class ArchivedRestoreContractTests(unittest.TestCase):
             self.assertEqual(impact['threads'], {parent, child})
             self.assertEqual(impact['archived'], 2)
             self.assertEqual(len(impact['files']), 2)
+            prepared = mock_archive_backup.prepare(profile, shared, backups, key, [parent])
+            self.assertEqual(prepared['threads'], 2)
+            manifest = json.loads((backups / 'latest' / 'manifest.json').read_text())['files']
+            self.assertTrue(set(impact['files']) <= set(manifest))
+            self.assertIn('state_5.sqlite', manifest)
+            self.assertIn('thread_history_1.sqlite', manifest)
+            history = profile / impact['files'][0]
+            original = history.read_bytes()
+            previous = (backups / 'latest' / impact['files'][0]).read_bytes()
+            original_replace = cosync_restore_backup.replace_latest
+            def changing_replace(*args, **kwargs):
+                verify = kwargs['pre_commit']
+                def change_then_verify(stage, saved):
+                    history.write_bytes(original + b'\n')
+                    verify(stage, saved)
+                kwargs['pre_commit'] = change_then_verify
+                return original_replace(*args, **kwargs)
+            with patch.object(mock_archive_backup.backup, 'replace_latest', side_effect=changing_replace):
+                with self.assertRaises(nexus_sync.SyncError):
+                    mock_archive_backup.prepare(profile, shared, backups, key, [parent])
+            self.assertEqual((backups / 'latest' / impact['files'][0]).read_bytes(), previous)
+            history.write_bytes(original)
             server = start()
             try:
                 call(server, 2, 'thread/unarchive', {'threadId': parent})

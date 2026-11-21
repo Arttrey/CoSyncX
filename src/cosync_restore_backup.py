@@ -42,7 +42,7 @@ def _resolve_file(root: Path, name: str) -> Path:
     return current
 
 
-def replace_latest(profile: Path, backup_root: Path, names: list[str]) -> Path:
+def replace_latest(profile: Path, backup_root: Path, names: list[str], *, pre_commit=None) -> Path:
     """Replace latest only after every new file is copied and verified.
 
     Paths must identify existing regular files beneath profile. The caller is
@@ -86,11 +86,22 @@ def replace_latest(profile: Path, backup_root: Path, names: list[str]) -> Path:
                     raise BackupError('Backup verification failed')
             os.chmod(target, 0o600)
             manifest[name] = _digest(target)
-        (stage / 'manifest.json').write_text(json.dumps({'version': 1, 'files': manifest}, sort_keys=True), encoding='utf-8')
-        os.chmod(stage / 'manifest.json', 0o600)
+        manifest_path = stage / 'manifest.json'
+        manifest_text = json.dumps({'version': 1, 'files': manifest}, sort_keys=True)
+        manifest_path.write_text(manifest_text, encoding='utf-8')
+        os.chmod(manifest_path, 0o600)
         for name, digest in manifest.items():
             if _digest(stage.joinpath(*PurePosixPath(name).parts)) != digest:
                 raise BackupError('Backup changed before commit')
+        if pre_commit is not None:
+            if not callable(pre_commit):
+                raise BackupError('Invalid backup verification callback')
+            pre_commit(stage, dict(manifest))
+            for name, digest in manifest.items():
+                if _digest(stage.joinpath(*PurePosixPath(name).parts)) != digest:
+                    raise BackupError('Backup changed during final verification')
+            if manifest_path.is_symlink() or manifest_path.read_text(encoding='utf-8') != manifest_text:
+                raise BackupError('Backup manifest changed during final verification')
         if latest.exists():
             os.rename(latest, previous)
             moved = True
