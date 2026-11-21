@@ -715,6 +715,8 @@ class DirectReceiver:
                         if ns._digest(path) != digest or manifest.get(relative) != digest:
                             raise ns.SyncError('Direct history changed during backup')
                 latest = backup.replace_latest(self.profile, self.backup_root, selection, pre_commit=verify_backup)
+                if not quiescence.is_quiet():
+                    return None
                 if path_reports:
                     self._write_path_report(path_reports)
                 changed = sorted(set([identity for identity, _, _, _ in prepared] +
@@ -741,6 +743,8 @@ class DirectReceiver:
                     json.dump(record, stream, sort_keys=True)
                     stream.flush(); os.fsync(stream.fileno())
                 for _, staged, relative, _ in prepared:
+                    if not quiescence.is_quiet():
+                        raise ns.SyncError('Codex started during direct restore')
                     parent = self.profile
                     for part in relative.parts[:-1]:
                         parent = parent / part
@@ -753,17 +757,23 @@ class DirectReceiver:
                     temporary = parent / ('.cosyncx-' + os.urandom(12).hex())
                     try:
                         ns._copy_stable_chat(staged, temporary)
+                        if not quiescence.is_quiet():
+                            raise ns.SyncError('Codex started during direct restore')
                         os.link(temporary, target, follow_symlinks=False)
                     finally:
                         temporary.unlink(missing_ok=True)
                 for _, target, _, original_digest, replacement, _ in recheck:
                     if replacement is None:
                         continue
+                    if not quiescence.is_quiet():
+                        raise ns.SyncError('Codex started during direct restore')
                     if target.is_symlink() or not target.is_file() or ns._digest(target) != original_digest:
                         raise ns.SyncError('Direct history changed after backup')
                     temporary = target.with_name('.cosyncx-' + os.urandom(12).hex())
                     try:
                         ns._copy_stable_chat(replacement, temporary)
+                        if not quiescence.is_quiet():
+                            raise ns.SyncError('Codex started during direct restore')
                         os.replace(temporary, target)
                     finally:
                         temporary.unlink(missing_ok=True)

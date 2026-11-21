@@ -16,6 +16,52 @@ from test_codex_contract import read_rpc_response, stop_server
 
 
 class DirectRestoreTests(unittest.TestCase):
+    def test_cursor_start_during_batch_stops_and_recovers(self):
+        with tempfile.TemporaryDirectory(prefix='cosyncx-cursor-start-') as tmp:
+            root = Path(tmp).resolve()
+            source, titles, graph, profile, backups, project = (root / name for name in
+                ('source', 'titles', 'graph', 'profile', 'backups', 'project'))
+            for path in (source, titles, graph, profile, backups, project):
+                path.mkdir(mode=0o700)
+            incoming = source / 'sessions'; incoming.mkdir()
+            identities = ['019b0000-0000-7000-8000-0000000000a1', '019b0000-0000-7000-8000-0000000000a2']
+            for identity in identities:
+                meta = {'id': identity, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': '/source/Nexus',
+                        'originator': 'codex_vscode', 'cli_version': '0.1.0', 'source': 'vscode',
+                        'model_provider': 'openai', 'history_mode': 'paginated'}
+                (incoming / f'rollout-2026-01-01T00-00-00-{identity}.jsonl').write_text(json.dumps(
+                    {'timestamp': meta['timestamp'], 'type': 'session_meta', 'payload': meta, 'ordinal': 0}) + '\n')
+            (titles / 'session_index.jsonl').write_text(''.join(
+                json.dumps({'id': identity, 'thread_name': 'test'}) + '\n' for identity in identities))
+            (graph / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1', 'edges': [],
+                'omitted_missing': 0, 'omitted_archived': 0}))
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                db.execute('CREATE TABLE threads (id TEXT, archived INTEGER)')
+            args = dict(source=source, titles=titles, graph=graph, profile=profile, backup_root=backups,
+                key=b'k' * 32, mappings=[('/source/Nexus', str(project))], codex=Path(sys.executable),
+                folder_ids=('sessions', 'titles', 'graph'), peer_id='vps')
+            busy = [False]
+            real_link = os.link
+            def link_then_start(src, dst, **kwargs):
+                result = real_link(src, dst, **kwargs)
+                if Path(dst).parent == profile / 'sessions':
+                    busy[0] = True
+                return result
+            with patch('cosync_direct_restore.quiescence.is_quiet', side_effect=lambda: not busy[0]), \
+                    patch('cosync_direct_restore.os.link', side_effect=link_then_start), \
+                    patch('cosync_direct_restore.indexer._index_profile') as indexer:
+                with self.assertRaises(ns.SyncError):
+                    DirectReceiver(**args)._receive()
+                self.assertEqual(len(list((profile / 'sessions').glob('*.jsonl'))), 1)
+                indexer.assert_not_called()
+                self.assertEqual(json.loads((backups / 'direct-restore-pending.json').read_text())['phase'], 'writing')
+            busy[0] = False
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True), \
+                    patch('cosync_direct_restore.indexer._index_profile') as indexer:
+                self.assertEqual(DirectReceiver(**args)._receive(), 2)
+                self.assertEqual(indexer.call_count, 2)
+            self.assertEqual(len(list((profile / 'sessions').glob('*.jsonl'))), 2)
+
     def test_missing_workspace_restores_with_private_warning(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-missing-workspace-') as tmp:
             root = Path(tmp).resolve()
