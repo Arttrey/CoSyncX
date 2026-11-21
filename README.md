@@ -60,7 +60,10 @@ of one selected chat while preserving other titles. These tools do not export
 other chats or relationships. The experimental `cosync_publish_batch` worker
 can publish an explicitly configured set of single-page histories and their
 titles. It defers histories with multiple pages or externally referenced pages;
-it does not discover new chats or export relationships. A separate guarded
+an optional `discover_new` setting adds newly created standalone active chats
+using a private absolute `discovery_state` directory. Discovery leaves chats
+with dependent sessions, incomplete lineage or multiple pages pending; it does
+not export relationships. A separate guarded
 multi-page replacement helper preserves previous pages and requires the
 exchange folder to be paused. The batch sender compares visible message counts;
 it does not assume the largest file or latest filesystem timestamp is newer.
