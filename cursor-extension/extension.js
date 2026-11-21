@@ -43,19 +43,26 @@ function activate(context) {
         readRestoreStatus(filename).then(status => {
             if (disposed || current !== generation) return;
             if (!status) {
-                item.text = '$(warning) CoSyncX: нет статуса';
-                item.tooltip = 'Не удалось проверить локальный статус восстановления CoSyncX.';
+                item.text = '$(warning) CoSyncX: status unavailable';
+                item.tooltip = 'CoSyncX cannot check chat synchronization right now; chat freshness is unknown.';
                 return;
             }
-            const labels = { TRANSFERRING: '$(sync~spin) CoSyncX: передача',
-                RESTORING: '$(sync~spin) CoSyncX: восстановление', PENDING: '$(warning) CoSyncX: ожидание',
-                COMPLETE: status.restore_event ? '$(check) CoSyncX: восстановлено' : '$(check) CoSyncX: передача завершена',
-                ERROR: '$(warning) CoSyncX: ошибка' };
-            item.text = labels[status.state];
-            item.tooltip = 'Локальный статус CoSyncX';
+            const labels = {
+                TRANSFERRING: ['$(sync~spin) CoSyncX: syncing chats',
+                    'Chat files are being transferred. Some chats may be out of date; you can keep working.'],
+                RESTORING: ['$(sync~spin) CoSyncX: syncing chats',
+                    'CoSyncX is checking and restoring chats. Some chats may be out of date; you can keep working.'],
+                PENDING: ['$(warning) CoSyncX: chats pending',
+                    'Some chats may be out of date. Synchronization is pending; you can keep working. Conflicts or unavailable paths may need attention.'],
+                COMPLETE: status.restore_event
+                    ? ['$(check) CoSyncX: restored', 'The latest confirmed chat restore has completed.']
+                    : ['$(check) CoSyncX: transfer complete', 'Transfer is complete; no chat restore has been confirmed.'],
+                ERROR: ['$(warning) CoSyncX: error', 'CoSyncX could not check or restore chats.']
+            };
+            [item.text, item.tooltip] = labels[status.state];
             if (status.missing_path_chats) {
-                if (status.state === 'COMPLETE') item.text = '$(warning) CoSyncX: проверьте пути';
-                item.tooltip = `В ${status.missing_path_chats} чатах есть недоступные на этом устройстве пути. Отчёт: ${status.missing_path_report}`;
+                if (status.state === 'COMPLETE') item.text = '$(warning) CoSyncX: check paths';
+                item.tooltip += ` ${status.missing_path_chats} chats reference paths unavailable on this device. Report: ${status.missing_path_report}`;
             }
             // An earlier successful restore may still need a reload even when
             // a newer transfer is already pending or in progress.

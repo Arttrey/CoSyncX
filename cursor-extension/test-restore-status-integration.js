@@ -46,20 +46,20 @@ const waitFor = async predicate => {
         extension.activate(context);
         await waitFor(() => calls.length === 1);
         assert.deepStrictEqual(calls, ['workbench.action.reloadWindow']);
-        assert.strictEqual(statusItem.text, '$(check) CoSyncX: восстановлено');
+        assert.strictEqual(statusItem.text, '$(check) CoSyncX: restored');
         refresh();
         await new Promise(resolve => setTimeout(resolve, 50));
         assert.strictEqual(calls.length, 1);
         fs.writeFileSync(file, JSON.stringify({format: 'cosyncx-restore-status-v1', updated_at_ms: Date.now(),
             mock_only: false, state: 'COMPLETE', restore_event: null}));
         refresh();
-        await waitFor(() => statusItem.text === '$(check) CoSyncX: передача завершена');
+        await waitFor(() => statusItem.text === '$(check) CoSyncX: transfer complete');
         assert.strictEqual(calls.length, 1);
         fs.writeFileSync(file, JSON.stringify({format: 'cosyncx-restore-status-v1', updated_at_ms: Date.now(),
             mock_only: false, state: 'COMPLETE', restore_event: event, missing_path_chats: 1,
             missing_path_report: path.join(root, 'missing-paths.json')}));
         refresh();
-        await waitFor(() => statusItem.text.includes('проверьте пути'));
+        await waitFor(() => statusItem.text.includes('check paths'));
         assert.ok(statusItem.tooltip.includes('missing-paths.json'));
         assert.strictEqual(calls.length, 1);
         const later = {...event, id: 'b'.repeat(32)};
@@ -67,8 +67,16 @@ const waitFor = async predicate => {
             mock_only: false, state: 'PENDING', restore_event: later}));
         refresh();
         await waitFor(() => calls.length === 2);
-        assert.strictEqual(statusItem.text, '$(warning) CoSyncX: ожидание');
+        assert.strictEqual(statusItem.text, '$(warning) CoSyncX: chats pending');
+        assert.ok(statusItem.tooltip.includes('may be out of date'));
+        assert.ok(statusItem.tooltip.includes('you can keep working'));
         assert.deepStrictEqual(calls, ['workbench.action.reloadWindow', 'workbench.action.reloadWindow']);
+        fs.writeFileSync(file, JSON.stringify({format: 'cosyncx-restore-status-v1', updated_at_ms: Date.now(),
+            mock_only: false, state: 'RESTORING', restore_event: later}));
+        refresh();
+        await waitFor(() => statusItem.text === '$(sync~spin) CoSyncX: syncing chats');
+        assert.ok(statusItem.tooltip.includes('may be out of date'));
+        assert.strictEqual(calls.length, 2);
         console.log('Cursor status-to-reload integration: OK');
     } finally {
         for (const item of context.subscriptions) if (item && item.dispose) item.dispose();
