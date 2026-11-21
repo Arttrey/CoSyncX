@@ -27,7 +27,11 @@ Cursor and Codex are quiet, including a linear multi-page source when no other
 history references its physical pages. A differing source history or title is
 applied after backing up the local state. Locally archived IDs stay archived;
 source archives are not transferred. Complete active relationship graphs are
-applied after indexing; missing-path reports remain unsupported.
+applied after indexing. When a source workspace is unavailable, a leaf chat
+uses the first configured local mapping root, while historical contexts remain
+unchanged. Missing workspaces and local files are recorded per chat in the
+private `missing-paths.json` under the backup root; Cursor displays a warning
+and the report location. The report retains prior warnings for review.
 `--exclude-thread-id ID` keeps a selected local conversation and its dependent
 sessions untouched. This is useful for a conversation continued on another
 device; changing its display name does not change its ID.

@@ -39,6 +39,12 @@ class RestoreSupervisorTests(unittest.TestCase):
             saved = json.loads(path.read_text())
             self.assertEqual(saved['state'], 'PENDING')
             self.assertEqual(saved['restore_event'], event)
+            receiver.path_warning_count = 2
+            receiver.backup_root = path.parent
+            supervisor.tick()
+            saved = json.loads(path.read_text())
+            self.assertEqual(saved['missing_path_chats'], 2)
+            self.assertEqual(saved['missing_path_report'], str(path.parent / 'missing-paths.json'))
 
 
 if __name__ == '__main__':

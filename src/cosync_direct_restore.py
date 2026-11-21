@@ -1,8 +1,7 @@
 """Guarded direct-folder receiver for active chats.
 
-Archived IDs, graphs and unavailable paths are left pending. Existing active
-versions are backed up before replacement. No profile write is attempted
-while Codex or Cursor runs.
+Archived IDs stay archived. Existing active versions are backed up before
+replacement. No profile write is attempted while Codex or Cursor runs.
 """
 import argparse
 import json
@@ -65,6 +64,53 @@ class DirectReceiver:
                                                      quiet_seconds=quiet_seconds)
         self.verified = {}
         self.pending_result = None
+        self.path_warning_count = 0
+        report = self.backup_root / 'missing-paths.json'
+        if report.is_file() and not report.is_symlink():
+            info = report.stat()
+            if (info.st_size <= 16 * 1024 * 1024 and
+                    (os.name == 'nt' or (info.st_uid == os.getuid() and not stat.S_IMODE(info.st_mode) & 0o077))):
+                try:
+                    value = json.loads(report.read_bytes())
+                    if value.get('version') == 1 and isinstance(value.get('chats'), dict):
+                        self.path_warning_count = len(value['chats'])
+                except (ValueError, TypeError, AttributeError):
+                    pass
+
+    def _write_path_report(self, reports):
+        """Keep missing local paths private and available across restarts."""
+        path = self.backup_root / 'missing-paths.json'
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise ns.SyncError('Missing-path report destination unavailable')
+        previous = {}
+        if path.is_file():
+            info = path.stat()
+            if (info.st_size > 16 * 1024 * 1024 or
+                    (os.name != 'nt' and (info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077))):
+                raise ns.SyncError('Missing-path report is not private or is too large')
+            value = json.loads(path.read_bytes())
+            if not isinstance(value, dict) or value.get('version') != 1 or not isinstance(value.get('chats'), dict):
+                raise ns.SyncError('Invalid missing-path report')
+            previous = value['chats']
+        previous.update(reports)
+        value = {'version': 1, 'chats': previous}
+        encoded = json.dumps(value, ensure_ascii=False).encode('utf-8')
+        if len(encoded) > 16 * 1024 * 1024:
+            raise ns.SyncError('Missing-path report too large')
+        fd, temporary = tempfile.mkstemp(prefix='.cosyncx-paths-', dir=self.backup_root)
+        temporary = Path(temporary)
+        try:
+            if hasattr(os, 'fchmod'):
+                os.fchmod(fd, 0o600)
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(encoded)
+                stream.flush(); os.fsync(stream.fileno())
+            if path.is_symlink():
+                raise ns.SyncError('Missing-path report destination changed')
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        self.path_warning_count = len(previous)
 
     def _read_journal(self):
         path = self.backup_root / 'direct-restore-pending.json'
@@ -534,6 +580,7 @@ class DirectReceiver:
         with tempfile.TemporaryDirectory(prefix='cosyncx-direct-prepare-') as temp:
             prepared = []
             recheck = []
+            path_reports = {}
             local_titles_data = ns._read_title_index(self.profile)
             local_titles = ({entry['id']: entry['thread_name'] for entry in ns._parse_title_index(local_titles_data)}
                             if local_titles_data is not None else {})
@@ -542,7 +589,8 @@ class DirectReceiver:
                     return None
                 stage = Path(temp).resolve() / str(number)
                 if len(entries) == 1:
-                    lineage.prepare_lineage(self.source, stage, identity, self.mappings)
+                    lineage.prepare_lineage(self.source, stage, identity, self.mappings,
+                                            fallback_root=Path(self.mappings[0][1]))
                 else:
                     if kinds[identity] != 'chat':
                         return None
@@ -553,9 +601,11 @@ class DirectReceiver:
                         if any(isinstance(item.get('history_base'), dict) and
                                item['history_base'].get('thread_id') in page_ids for item in other_entries):
                             return None
-                    indexer._prepare_flattened(self.source, stage, identity, self.mappings)
-                if (stage / 'cosyncx-path-report.json').exists():
-                    return None
+                    indexer._prepare_flattened(self.source, stage, identity, self.mappings,
+                                               fallback_root=Path(self.mappings[0][1]))
+                report = stage / 'cosyncx-path-report.json'
+                if report.is_file() and not report.is_symlink():
+                    path_reports[identity] = json.loads(report.read_bytes())
                 staged = ns._chat_catalog(stage, include_unsupported=True).get(identity, [])
                 if len(staged) != 1:
                     return None
@@ -649,6 +699,8 @@ class DirectReceiver:
                         if ns._digest(path) != digest or manifest.get(relative) != digest:
                             raise ns.SyncError('Direct history changed during backup')
                 latest = backup.replace_latest(self.profile, self.backup_root, selection, pre_commit=verify_backup)
+                if path_reports:
+                    self._write_path_report(path_reports)
                 changed = sorted(set([identity for identity, _, _, _ in prepared] +
                            [identity for identity, _, _, _, replacement, title_changed in recheck
                             if replacement is not None or title_changed]) | graph_changed)

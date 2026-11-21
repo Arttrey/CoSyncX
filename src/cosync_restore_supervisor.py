@@ -23,7 +23,11 @@ class RestoreSupervisor:
         self.last_event = previous.get('restore_event') if previous else None
 
     def _publish(self, state):
-        status.write_status(self.status_file, state, mock_only=self.mock_only, event=self.last_event)
+        count = getattr(self.receiver, 'path_warning_count', 0)
+        root = getattr(self.receiver, 'backup_root', None)
+        report = str(root / 'missing-paths.json') if count and isinstance(root, Path) else None
+        status.write_status(self.status_file, state, mock_only=self.mock_only, event=self.last_event,
+                            missing_path_chats=count, missing_path_report=report)
 
     def tick(self):
         try:

@@ -50,6 +50,13 @@ const waitFor = async predicate => {
         refresh();
         await new Promise(resolve => setTimeout(resolve, 50));
         assert.strictEqual(calls.length, 1);
+        fs.writeFileSync(file, JSON.stringify({format: 'cosyncx-restore-status-v1', updated_at_ms: Date.now(),
+            mock_only: false, state: 'COMPLETE', restore_event: event, missing_path_chats: 1,
+            missing_path_report: path.join(root, 'missing-paths.json')}));
+        refresh();
+        await waitFor(() => statusItem.text.includes('проверьте пути'));
+        assert.ok(statusItem.tooltip.includes('missing-paths.json'));
+        assert.strictEqual(calls.length, 1);
         const later = {...event, id: 'b'.repeat(32)};
         fs.writeFileSync(file, JSON.stringify({format: 'cosyncx-restore-status-v1', updated_at_ms: Date.now(),
             mock_only: false, state: 'PENDING', restore_event: later}));

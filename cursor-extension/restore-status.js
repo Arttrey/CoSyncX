@@ -28,6 +28,9 @@ async function readRestoreStatus(filename) {
                 || !Number.isSafeInteger(value.updated_at_ms) || value.updated_at_ms > Date.now() + 5000
                 || Date.now() - value.updated_at_ms > 90000
                 || !['TRANSFERRING', 'RESTORING', 'PENDING', 'COMPLETE', 'ERROR'].includes(value.state)) return null;
+        if (value.missing_path_chats !== undefined && (!Number.isSafeInteger(value.missing_path_chats)
+                || value.missing_path_chats < 1 || typeof value.missing_path_report !== 'string'
+                || !path.isAbsolute(value.missing_path_report))) return null;
         return value;
     } catch (_) {
         return null;

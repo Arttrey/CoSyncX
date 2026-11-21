@@ -55,13 +55,19 @@ def read_status(path: Path, *, mock_only: bool, max_age_ms: int | None = 90000) 
         return None
 
 
-def write_status(path: Path, state: str, *, mock_only: bool, event: dict | None = None) -> None:
+def write_status(path: Path, state: str, *, mock_only: bool, event: dict | None = None,
+                 missing_path_chats: int = 0, missing_path_report: str | None = None) -> None:
     if (not path.is_absolute() or state not in {'TRANSFERRING', 'RESTORING', 'PENDING', 'COMPLETE', 'ERROR'}
             or type(mock_only) is not bool):
         raise StatusError('Invalid status')
     if event is not None:
         if not _valid_event(event, mock_only):
             raise StatusError('Invalid restore event')
+    if (type(missing_path_chats) is not int or missing_path_chats < 0
+            or (missing_path_report is not None and
+                (not isinstance(missing_path_report, str) or not Path(missing_path_report).is_absolute()))
+            or bool(missing_path_chats) != bool(missing_path_report)):
+        raise StatusError('Invalid missing-path warning')
     parent = path.parent
     if parent.is_symlink() or not parent.is_dir() or path.is_symlink():
         raise StatusError('Status directory is unavailable')
@@ -72,6 +78,9 @@ def write_status(path: Path, state: str, *, mock_only: bool, event: dict | None 
                   if event is not None else None)
     status = {'format': 'cosyncx-restore-status-v1', 'state': state, 'mock_only': mock_only,
               'updated_at_ms': int(time.time() * 1000), 'restore_event': safe_event}
+    if missing_path_chats:
+        status['missing_path_chats'] = missing_path_chats
+        status['missing_path_report'] = missing_path_report
     fd, temporary = tempfile.mkstemp(prefix='.cosyncx-status-', dir=parent)
     temporary = Path(temporary)
     try:

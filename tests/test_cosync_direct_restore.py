@@ -16,6 +16,43 @@ from test_codex_contract import read_rpc_response, stop_server
 
 
 class DirectRestoreTests(unittest.TestCase):
+    def test_missing_workspace_restores_with_private_warning(self):
+        with tempfile.TemporaryDirectory(prefix='cosyncx-missing-workspace-') as tmp:
+            root = Path(tmp).resolve()
+            source, titles, graph, profile, backups, project = (root / name for name in
+                ('source', 'titles', 'graph', 'profile', 'backups', 'project'))
+            for path in (source, titles, graph, profile, backups, project):
+                path.mkdir(mode=0o700)
+            folder = source / 'sessions'; folder.mkdir()
+            identity = '019b0000-0000-7000-8000-000000000081'
+            foreign = '/foreign/missing-project'
+            meta = {'id': identity, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': foreign,
+                    'originator': 'codex_vscode', 'cli_version': '0.1.0', 'source': 'vscode',
+                    'model_provider': 'openai', 'history_mode': 'paginated'}
+            history = folder / f'rollout-2026-01-01T00-00-00-{identity}.jsonl'
+            history.write_text(json.dumps({'timestamp': meta['timestamp'], 'type': 'session_meta',
+                                           'payload': meta, 'ordinal': 0}) + '\n')
+            (titles / 'session_index.jsonl').write_text(json.dumps({'id': identity, 'thread_name': 'test'}) + '\n')
+            (graph / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1', 'edges': [],
+                'omitted_missing': 0, 'omitted_archived': 0}))
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                db.execute('CREATE TABLE threads (id TEXT, archived INTEGER)')
+            args = dict(source=source, titles=titles, graph=graph, profile=profile, backup_root=backups,
+                key=b'k' * 32, mappings=[('/source/Nexus', str(project))], codex=Path(sys.executable),
+                folder_ids=('sessions', 'titles', 'graph'), peer_id='vps')
+            receiver = DirectReceiver(**args)
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True), \
+                    patch('cosync_direct_restore.indexer._index_profile'):
+                self.assertEqual(receiver._receive(), 1)
+            saved = json.loads((profile / 'sessions' / history.name).read_text())
+            self.assertEqual(saved['payload']['cwd'], str(project))
+            report_path = backups / 'missing-paths.json'
+            self.assertEqual(report_path.stat().st_mode & 0o077, 0)
+            report = json.loads(report_path.read_text())
+            self.assertEqual(report['chats'][identity]['unmapped_working_directories'], [foreign])
+            self.assertEqual(receiver.path_warning_count, 1)
+            self.assertEqual(DirectReceiver(**args).path_warning_count, 1)
+
     def test_excluded_active_chat_and_its_children_are_untouched(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-excluded-chat-') as tmp:
             root = Path(tmp).resolve()
@@ -518,7 +555,7 @@ class DirectRestoreTests(unittest.TestCase):
             folder = source / 'sessions' / '2026' / '01' / '01'
             folder.mkdir(parents=True)
             history = folder / f'rollout-2026-01-01T00-00-00-{thread}.jsonl'
-            meta = {'id': thread, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': '/source/Nexus',
+            meta = {'id': thread, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': '/source/missing-project',
                     'originator': 'codex_vscode', 'cli_version': '0.1.0', 'source': 'vscode', 'model_provider': 'openai'}
             rows = [{'timestamp': '2026-01-01T00:00:00.000Z', 'type': 'session_meta', 'payload': meta},
                     {'timestamp': '2026-01-01T00:00:01.000Z', 'type': 'response_item', 'payload':
@@ -574,6 +611,9 @@ class DirectRestoreTests(unittest.TestCase):
             with sqlite3.connect(profile / 'state_5.sqlite') as db:
                 row = db.execute('SELECT archived FROM threads WHERE id=?', (thread,)).fetchone()
             self.assertEqual(row, (0,))
+            self.assertEqual(receiver.path_warning_count, 1)
+            self.assertEqual(json.loads((backups / 'missing-paths.json').read_text())['chats'][thread]
+                             ['unmapped_working_directories'], ['/source/missing-project'])
             self.assertFalse(journal.exists())
             self.assertEqual(receiver._read_carry(), [{'id': event_id, 'count': 1}])
             receiver.acknowledge({'id': event_id, 'indexed': True, 'changed_chats': 1})

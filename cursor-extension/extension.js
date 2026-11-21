@@ -52,6 +52,10 @@ function activate(context) {
                 COMPLETE: '$(check) CoSyncX: синхронизировано', ERROR: '$(warning) CoSyncX: ошибка' };
             item.text = labels[status.state];
             item.tooltip = 'Локальный статус CoSyncX';
+            if (status.missing_path_chats) {
+                if (status.state === 'COMPLETE') item.text = '$(warning) CoSyncX: проверьте пути';
+                item.tooltip = `В ${status.missing_path_chats} чатах есть недоступные на этом устройстве пути. Отчёт: ${status.missing_path_report}`;
+            }
             // An earlier successful restore may still need a reload even when
             // a newer transfer is already pending or in progress.
             maybeReload(status.restore_event, cfg.get('autoReloadAfterRestore') === true).catch(() => {});
