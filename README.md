@@ -13,6 +13,9 @@ does not prove that a chat is available or up to date in Codex.
 The experimental restore reload handler and single-generation backup helper are
 not connected to a production receiver. They do not enable automatic import or
 reload of real chats. The mock receiver also supports macOS in isolated tests.
+The experimental automatic change gate likewise does not run a receiver: it
+waits for a connected, settled Syncthing revision and refuses to produce a reload
+event without a separately confirmed successful restore and indexing.
 The experimental `cosyncx prepare-lineage` command rewrites structured project
 paths and dependent byte offsets for a complete paginated thread into a new
 isolated directory. It does not import chats or rebuild the live Codex index.
