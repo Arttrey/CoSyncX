@@ -17,7 +17,8 @@ _NAME = re.compile(r'^rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4
 
 def publish(source: Path, destination: Path, state_dir: Path, *, replace_initial: bool = False,
             prefer_local: bool = False, prefer_more: bool = False,
-            path_roots: tuple[str, str] | None = None) -> str:
+            path_roots: tuple[str, str] | None = None, subagent: bool = False,
+            prefer_local_on_tie: bool = False) -> str:
     """Copy a complete stable history; retain one backup and defer conflicts."""
     source, destination, state_dir = map(Path, (source, destination, state_dir))
     if not all(p.is_absolute() for p in (source, destination, state_dir)):
@@ -44,6 +45,10 @@ def publish(source: Path, destination: Path, state_dir: Path, *, replace_initial
             raise ns.SyncError('Invalid publication digest')
     if prefer_local and prefer_more:
         raise ns.SyncError('Conflicting publication policies')
+    if type(subagent) is not bool:
+        raise ns.SyncError('Invalid chat type')
+    if type(prefer_local_on_tie) is not bool or (prefer_local_on_tie and not prefer_more):
+        raise ns.SyncError('Invalid equal-message conflict policy')
     if (prefer_local or prefer_more) and (not isinstance(path_roots, tuple) or len(path_roots) != 2
                          or any(not isinstance(root, str) or not root for root in path_roots)):
         raise ns.SyncError('Path roots required for local conflict preference')
@@ -63,9 +68,9 @@ def publish(source: Path, destination: Path, state_dir: Path, *, replace_initial
             ns._copy_stable_chat(destination, old)
             if ns._digest(old) != before or ns._digest(destination) != before:
                 return 'CONFLICT'
-            decision = policy.choose(snapshot, old, *path_roots)
+            decision = policy.choose(snapshot, old, *path_roots, subagent=subagent)
             if decision == 'TARGET_MORE': return 'WAITING_REMOTE'
-            if decision == 'TIE': return 'TIE'
+            if decision == 'TIE' and not prefer_local_on_tie: return 'TIE'
             if decision == 'EQUAL':
                 changed = False
                 digest = before
@@ -108,11 +113,14 @@ def main():
     parser.add_argument('--replace-initial', action='store_true')
     parser.add_argument('--prefer-local', action='store_true')
     parser.add_argument('--prefer-more-messages', action='store_true')
+    parser.add_argument('--prefer-local-on-tie', action='store_true')
     parser.add_argument('--path-roots', nargs=2, metavar=('LOCAL_ROOT', 'REMOTE_ROOT'))
     parser.add_argument('--interval', type=int, default=30)
     args = parser.parse_args()
     if not 10 <= args.interval <= 3600:
         parser.error('Interval must be between 10 and 3600 seconds')
+    if args.prefer_local_on_tie and not args.prefer_more_messages:
+        parser.error('--prefer-local-on-tie requires --prefer-more-messages')
     last_fingerprint = None
     last_result = None
     while True:
@@ -127,7 +135,8 @@ def main():
             else:
                 result = publish(args.source, args.destination, args.state_dir, replace_initial=args.replace_initial,
                                  prefer_local=args.prefer_local, prefer_more=args.prefer_more_messages,
-                                 path_roots=tuple(args.path_roots) if args.path_roots else None)
+                                 path_roots=tuple(args.path_roots) if args.path_roots else None,
+                                 prefer_local_on_tie=args.prefer_local_on_tie)
             after_fingerprint = (fingerprint(args.source), fingerprint(args.destination))
             last_fingerprint = after_fingerprint if current_fingerprint[0] == after_fingerprint[0] else None
             last_result = result

@@ -16,6 +16,39 @@ from test_codex_contract import read_rpc_response, stop_server
 
 
 class DirectRestoreTests(unittest.TestCase):
+    def test_completed_batch_notifies_when_new_transfer_arrives_during_indexing(self):
+        from cosync_auto_gate import MultiFolderGate
+        receiver = DirectReceiver.__new__(DirectReceiver)
+        receiver.gate = MultiFolderGate(folder_ids=('sessions','titles','graph'), peer_id='vps', quiet_seconds=0)
+        receiver.pending_result = None
+        receiver.pending_busy_ids = frozenset()
+        receiver.unresolved_archived_count = 0
+        receiver._last_fingerprints = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            receiver.backup_root = Path(tmp)
+            status = {'state':'idle','sequence':1,'remoteSequence':{'vps':1},'needFiles':0,
+                      'needDirectories':0,'needSymlinks':0,'needDeletes':0,'errors':0,'pullErrors':0}
+            readers = [lambda folder=folder: (folder, status, True, 'valid')
+                       for folder in ('sessions','titles','graph')]
+            record = {'phase':'indexed','threads':['one'],'event_id':'a'*32}
+            def receive(on_restore=None):
+                status['sequence'] = 2
+                status['remoteSequence'] = {'vps':2}
+                return 1
+            with patch.object(receiver, '_receive', side_effect=receive), \
+                 patch.object(receiver, '_read_journal', return_value=record), \
+                 patch.object(receiver, '_read_carry', return_value=[]), \
+                 patch.object(receiver, '_cache_verified_sources') as cache:
+                def poll(now): return receiver.poll(readers[0], title_status_reader=readers[1],
+                                                   graph_status_reader=readers[2], now=now)
+                self.assertEqual(poll(0)['state'], 'WAITING')
+                result = poll(1)
+                self.assertEqual(result['state'], 'PENDING')
+                self.assertEqual(result['restore_event']['changed_chats'], 1)
+                self.assertTrue(result['acknowledge_required'])
+                cache.assert_called_once()
+                self.assertEqual(poll(2), result)
+
     @unittest.skipUnless(sys.platform in ('linux', 'darwin'), 'requires Unix writer locks')
     def test_busy_chat_is_retried_without_blocking_an_independent_chat(self):
         import fcntl

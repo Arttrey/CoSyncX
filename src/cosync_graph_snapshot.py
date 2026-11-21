@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import stat
 import sys
@@ -17,6 +18,74 @@ import uuid
 
 class GraphError(Exception):
     pass
+
+
+def read_shared_graph(directory: Path):
+    """Merge independent device graphs without overwriting another device.
+
+    A child with conflicting relationships is returned separately so its
+    history can wait while unrelated chats continue to be restored.
+    """
+    directory = Path(directory)
+    base = directory / 'graph.json'
+    devices = directory / 'devices'
+    if directory.is_symlink() or not directory.is_dir() or devices.is_symlink():
+        raise GraphError('Graph directory unavailable')
+    files = [base]
+    if devices.exists():
+        if not devices.is_dir():
+            raise GraphError('Device graph directory unavailable')
+        for path in sorted(devices.iterdir()):
+            if re.fullmatch(r'[0-9a-f]{32}(?:\.sync-conflict-[A-Za-z0-9-]+)?\.json', path.name):
+                files.append(path)
+    if len(files) > 257:
+        raise GraphError('Too many device graphs')
+    values = []
+    for path in files:
+        if path.is_symlink() or not path.is_file():
+            raise GraphError('Graph file unavailable')
+        before = path.stat()
+        if before.st_size > 32 * 1024 * 1024:
+            raise GraphError('Graph file too large')
+        raw = path.read_bytes(); after = path.stat()
+        if ((before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                != (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) or len(raw) != before.st_size):
+            raise GraphError('Graph changed while reading')
+        value = json.loads(raw)
+        if (not isinstance(value, dict) or value.get('format') != 'cosyncx-active-graph-v1'
+                or type(value.get('omitted_missing')) is not int or value['omitted_missing'] != 0
+                or type(value.get('omitted_archived')) is not int or value['omitted_archived'] < 0
+                or not isinstance(value.get('edges'), list)):
+            raise GraphError('Invalid graph')
+        values.append((raw, value))
+    if len(values) == 1:
+        return values[0][0], values[0][1], set()
+    by_child, blocked = {}, set()
+    for _, value in values:
+        seen = set()
+        for edge in value['edges']:
+            if (not isinstance(edge, dict) or set(edge) != {'parent', 'child', 'status'}
+                    or not _uuid(edge['parent']) or not _uuid(edge['child']) or edge['parent'] == edge['child']
+                    or edge['status'] not in ('open', 'closed') or edge['child'] in seen):
+                raise GraphError('Invalid graph relationship')
+            seen.add(edge['child'])
+            previous = by_child.get(edge['child'])
+            if previous is not None and previous != edge:
+                blocked.add(edge['child'])
+            else:
+                by_child[edge['child']] = edge
+    parents = {child: edge['parent'] for child, edge in by_child.items() if child not in blocked}
+    for start in parents:
+        order, seen, current = [], {}, start
+        while current in parents and current not in seen:
+            seen[current] = len(order); order.append(current); current = parents[current]
+        if current in seen:
+            blocked.update(order[seen[current]:])
+    combined = {'format': 'cosyncx-active-graph-v1', 'edges': [by_child[key] for key in sorted(by_child) if key not in blocked],
+                'omitted_missing': 0, 'omitted_archived': sum(value['omitted_archived'] for _, value in values),
+                'blocked_children': sorted(blocked)}
+    raw = json.dumps(combined, sort_keys=True, separators=(',', ':')).encode()
+    return raw, combined, blocked
 
 
 def _uuid(value):

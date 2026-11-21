@@ -543,13 +543,10 @@ class DirectReceiver:
             prior = None
         if prior is not None and prior.get('phase') not in ('indexing', 'indexed'):
             return None
-        graph_file = self.graph / 'graph.json'
-        if graph_file.is_symlink() or not graph_file.is_file() or graph_file.stat().st_size > 32 * 1024 * 1024:
+        try:
+            graph_bytes, graph, graph_conflicts = graph_schema.read_shared_graph(self.graph)
+        except (graph_schema.GraphError, OSError, ValueError, TypeError):
             return None
-        graph_bytes = graph_file.read_bytes()
-        if ns._digest(graph_file) != hashlib.sha256(graph_bytes).hexdigest():
-            return None
-        graph = json.loads(graph_bytes)
         if (not isinstance(graph, dict) or graph.get('format') != 'cosyncx-active-graph-v1'
                 or not isinstance(graph.get('edges'), list) or type(graph.get('omitted_missing')) is not int
                 or graph['omitted_missing'] != 0 or type(graph.get('omitted_archived')) is not int
@@ -599,6 +596,7 @@ class DirectReceiver:
             skipped.update(set(incoming) & archived_ids)
         self.unresolved_archived_count = sum(identity in skipped and identity not in self.excluded_thread_ids
                                              and source_kinds[identity] == 'chat' for identity in incoming)
+        skipped.update(graph_conflicts & set(incoming))
         # An indexed thread without its local history cannot safely be treated
         # as a new thread. Defer it and its descendants, not the whole batch.
         orphan_ids = (set(incoming) - skipped) & indexed_ids - set(local)
@@ -626,7 +624,7 @@ class DirectReceiver:
             except (ns.SyncError, locking.MockChatBusy, OSError, ValueError):
                 pass
         skipped.update(orphan_ids)
-        self.pending_busy_ids = frozenset(orphan_ids)
+        self.pending_busy_ids = frozenset(orphan_ids | (graph_conflicts & set(incoming)))
         self._ignored_busy = frozenset()
         if set(incoming) - skipped:
             try:
@@ -651,7 +649,7 @@ class DirectReceiver:
                         continue
                     try:
                         fallback = self._existing_workspace(current)
-                        if (not current or source_kinds[identity] != 'chat') and len(entries) == 1:
+                        if not current and len(entries) == 1:
                             cwd = entries[0].get('cwd')
                             if not isinstance(cwd, str): raise ns.SyncError('Working directory unavailable')
                             lineage._map_cwd(cwd, self.mappings)
@@ -671,12 +669,13 @@ class DirectReceiver:
                                                        preserve_unmapped_history=True)
                         staged = ns._chat_catalog(stage, include_unsupported=True).get(identity, [])
                         if len(staged) != 1: raise ns.SyncError('History comparison unavailable')
-                        if not current or source_kinds[identity] != 'chat':
+                        if not current:
                             continue
                         snapshot = Path(tmp) / ('local-' + str(number) + '.jsonl')
                         ns._copy_stable_chat(current[0]['path'], snapshot)
                         choice = message_policy.choose(staged[0]['path'], snapshot,
-                                                       self.mappings[0][1], self.mappings[0][1])
+                                                       self.mappings[0][1], self.mappings[0][1],
+                                                       subagent=source_kinds[identity] == 'subagent')
                         if choice in ('TARGET_MORE', 'TIE'):
                             skipped.add(identity)
                             self.pending_busy_ids |= frozenset((identity,))
@@ -908,8 +907,9 @@ class DirectReceiver:
                     if relation not in ('EQUIVALENT_AFTER_PATH_MAPPING', 'LOCAL_EXTENDS_AFTER_PATH_MAPPING',
                                         'INCOMING_EXTENDS_AFTER_PATH_MAPPING', 'DIVERGED'):
                         return None
-                    if self.prefer_more_messages and kinds[identity] == 'chat':
-                        choice = message_policy.choose(staged[0]['path'], current[0]['path'], target, target)
+                    if self.prefer_more_messages:
+                        choice = message_policy.choose(staged[0]['path'], current[0]['path'], target, target,
+                                                       subagent=kinds[identity] == 'subagent')
                         if choice not in ('SOURCE_MORE', 'EQUAL'): return None
                         replacement = staged[0]['path'] if choice == 'SOURCE_MORE' else None
                     else:
@@ -1120,6 +1120,21 @@ class DirectReceiver:
         try:
             event = self.gate.complete(revision, result, after=observe())
         except ValueError:
+            # A new transfer can arrive while this batch is being indexed.
+            # Its revision still needs another pass, but an authenticated,
+            # fully indexed journal already proves this batch was applied.
+            self._cache_verified_sources(self._last_fingerprints)
+            self.gate.request_retry()
+            if (record is not None and record.get('phase') == 'indexed'
+                    and isinstance(record.get('threads'), list)
+                    and count == len(record['threads'])):
+                event_id = carry[0]['id'] if carry else record.get('event_id')
+                if total and isinstance(event_id, str) and len(event_id) == 32:
+                    event = {'id': event_id, 'state': 'RESTORED', 'indexed': True,
+                             'changed_chats': total, 'mock_only': False}
+                    self.pending_result = {'state': 'PENDING', 'mock_only': False,
+                                           'restore_event': event, 'acknowledge_required': True}
+                    return self.pending_result
             return {'state': 'PENDING', 'mock_only': False}
         self._cache_verified_sources(self._last_fingerprints)
         if event is not None:

@@ -66,9 +66,12 @@ other chats or relationships. The experimental `cosync_publish_batch` worker
 can publish an explicitly configured set of single-page histories and their
 titles. It defers histories with multiple pages or externally referenced pages;
 an optional `discover_new` setting adds newly created standalone active chats
-using a private absolute `discovery_state` directory. Discovery leaves chats
-with dependent sessions, incomplete lineage or multiple pages pending; it does
-not export relationships. A separate guarded
+using a private absolute `discovery_state` directory. When an explicitly
+configured send-and-receive graph folder and peer are verified (including
+encryption when required by the device configuration),
+discovery also publishes eligible single-page child sessions and writes the
+device's relationships separately. Conflicting relationships, incomplete
+lineage and multiple-page histories remain pending. A separate guarded
 multi-page replacement helper preserves previous pages and requires the
 exchange folder to be paused. The batch sender compares visible message counts;
 it does not assume the largest file or latest filesystem timestamp is newer.

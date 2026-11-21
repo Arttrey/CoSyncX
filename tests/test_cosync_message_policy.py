@@ -12,6 +12,20 @@ def record(message):
 
 
 class MessagePolicyTests(unittest.TestCase):
+    def test_subagent_preserves_append_only_tool_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a,b=Path(tmp)/'a',Path(tmp)/'b'
+            meta={'type':'session_meta','ordinal':0,'payload':{'subagent_history_start_ordinal':0}}
+            answer={'type':'event_msg','ordinal':1,'payload':{'type':'agent_message','message':'same'}}
+            tool={'type':'response_item','ordinal':2,'payload':{'type':'function_call_output','output':'additional result'}}
+            base=''.join(json.dumps(row)+'\n' for row in (meta,answer));b.write_text(base)
+            a.write_text(base+json.dumps(tool)+'\n')
+            self.assertEqual(choose(a,b,'/source','/target',subagent=True),'SOURCE_MORE')
+            self.assertEqual(choose(b,a,'/target','/source',subagent=True),'TARGET_MORE')
+            a.write_text(base+json.dumps({**tool,'payload':{'type':'function_call_output','output':'other'}})+'\n')
+            b.write_text(base+json.dumps(tool)+'\n')
+            self.assertEqual(choose(a,b,'/source','/target',subagent=True),'TIE')
+
     def test_message_count_not_file_size_or_time_selects_version(self):
         with tempfile.TemporaryDirectory() as tmp:
             a, b = Path(tmp) / 'a.jsonl', Path(tmp) / 'b.jsonl'

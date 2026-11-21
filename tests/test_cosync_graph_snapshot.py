@@ -4,10 +4,28 @@ import sqlite3
 import tempfile
 import unittest
 
-from cosync_graph_snapshot import GraphError, read_graph, write_graph
+from cosync_graph_snapshot import GraphError, read_graph, read_shared_graph, write_graph
 
 
 class GraphSnapshotTests(unittest.TestCase):
+    def test_device_graphs_merge_and_conflicting_child_is_deferred(self):
+        base = {'format':'cosyncx-active-graph-v1','omitted_missing':0,'omitted_archived':0,
+                'edges':[{'parent':self.ids[0],'child':self.ids[1],'status':'open'}]}
+        (self.output/'graph.json').write_text(json.dumps(base))
+        devices=self.output/'devices';devices.mkdir()
+        peer={'format':'cosyncx-active-graph-v1','omitted_missing':0,'omitted_archived':0,
+              'edges':[{'parent':self.ids[0],'child':self.ids[2],'status':'closed'}]}
+        (devices/('a'*32+'.json')).write_text(json.dumps(peer))
+        _,combined,blocked=read_shared_graph(self.output)
+        self.assertEqual(len(combined['edges']),2);self.assertEqual(blocked,set())
+        peer['edges'].append({'parent':self.ids[3],'child':self.ids[1],'status':'open'})
+        (devices/('a'*32+'.json')).write_text(json.dumps(peer))
+        _,combined,blocked=read_shared_graph(self.output)
+        self.assertEqual(blocked,{self.ids[1]})
+        self.assertEqual([x['child'] for x in combined['edges']],[self.ids[2]])
+        (devices/'unknown.json').write_text('{}')
+        self.assertEqual(read_shared_graph(self.output)[2],{self.ids[1]})
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='cosyncx-graph-test-')
         self.addCleanup(self.temp.cleanup)

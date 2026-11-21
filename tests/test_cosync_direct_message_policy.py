@@ -7,9 +7,80 @@ import unittest
 from unittest.mock import patch
 
 from cosync_direct_restore import DirectReceiver
+import nexus_sync as ns
 
 
 class DirectMessagePolicyTests(unittest.TestCase):
+    def test_subagent_conflicts_keep_more_messages_and_do_not_block_others(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();source,titles,graph,profile,backups,project=(root/n for n in
+                ('source','titles','graph','profile','backups','project'))
+            for p in (source,titles,graph,profile,backups,project):p.mkdir(mode=0o700)
+            (source/'sessions').mkdir();(profile/'sessions').mkdir()
+            parent,a,b,c=[f'019b0000-0000-7000-8000-{n:012d}' for n in (1,2,3,4)]
+            def history(identity,cwd,messages,child=False):
+                payload={'id':identity,'cwd':cwd,'source':{'subagent':{'other':'guardian'}} if child else 'vscode',
+                         'history_mode':'paginated'}
+                if child:payload['parent_thread_id']=parent
+                rows=[{'type':'session_meta','ordinal':0,'payload':payload}]
+                rows += [{'type':'event_msg','ordinal':i+1,'payload':{'type':'agent_message' if child else 'user_message',
+                            'message':text}} for i,text in enumerate(messages)]
+                return ''.join(json.dumps(x)+'\n' for x in rows)
+            source_messages={parent:['parent'],a:['old'],b:['new','newer'],c:['remote']}
+            local_messages={parent:['parent'],a:['old','local newer'],b:['old'],c:['local']}
+            for identity in (parent,a,b,c):
+                name=f'rollout-2026-01-01T00-00-00-{identity}.jsonl'
+                (source/'sessions'/name).write_text(history(identity,'/source/Nexus',source_messages[identity],identity!=parent))
+                (profile/'sessions'/name).write_text(history(identity,str(project),local_messages[identity],identity!=parent))
+            (titles/'session_index.jsonl').write_text(json.dumps({'id':parent,'thread_name':'parent'})+'\n')
+            (profile/'session_index.jsonl').write_text(json.dumps({'id':parent,'thread_name':'parent'})+'\n')
+            (graph/'graph.json').write_text(json.dumps({'format':'cosyncx-active-graph-v1','edges':[],
+                                                       'omitted_missing':0,'omitted_archived':0}))
+            with sqlite3.connect(profile/'state_5.sqlite') as db:
+                db.execute('CREATE TABLE threads (id TEXT,archived INTEGER)')
+                db.executemany('INSERT INTO threads VALUES (?,0)',[(i,) for i in (parent,a,b,c)])
+            with sqlite3.connect(profile/'thread_history_1.sqlite') as db:db.execute('CREATE TABLE test (value TEXT)')
+            receiver=DirectReceiver(source=source,titles=titles,graph=graph,profile=profile,backup_root=backups,
+                key=b'k'*32,mappings=[('/source/Nexus',str(project))],codex=Path(sys.executable),
+                folder_ids=('sessions','titles','graph'),peer_id='vps',prefer_more_messages=True)
+            files={i:profile/'sessions'/f'rollout-2026-01-01T00-00-00-{i}.jsonl' for i in (a,b,c)}
+            before_a,before_c=files[a].read_bytes(),files[c].read_bytes()
+            with patch('cosync_direct_restore.quiescence.is_quiet',return_value=True), \
+                 patch('cosync_direct_restore.indexer._index_profile'), \
+                 patch('cosync_direct_restore.indexer._reset_profile_projection'):
+                self.assertEqual(receiver._receive(),1)
+            self.assertEqual(files[a].read_bytes(),before_a);self.assertEqual(files[c].read_bytes(),before_c)
+            self.assertIn('newer',files[b].read_text());self.assertTrue({a,c} <= receiver.pending_busy_ids)
+
+    def test_conflicting_child_graph_does_not_block_other_chats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();source,titles,graph,profile,backups,project=(root/n for n in
+                ('source','titles','graph','profile','backups','project'))
+            for p in (source,titles,graph,profile,backups,project):p.mkdir(mode=0o700)
+            (source/'sessions').mkdir();(profile/'sessions').mkdir();(graph/'devices').mkdir()
+            a,b,child=[f'019b0000-0000-7000-8000-{n:012d}' for n in (1,2,3)]
+            for identity,source_type,parent in ((a,'vscode',None),(b,'vscode',None),
+                                               (child,{'subagent':{'other':'guardian'}},a)):
+                payload={'id':identity,'cwd':'/source/Nexus','source':source_type,'history_mode':'paginated'}
+                if parent:payload['parent_thread_id']=parent
+                (source/'sessions'/f'rollout-2026-01-01T00-00-00-{identity}.jsonl').write_text(
+                    json.dumps({'type':'session_meta','ordinal':0,'payload':payload})+'\n')
+            (titles/'session_index.jsonl').write_text(''.join(json.dumps({'id':i,'thread_name':'name'})+'\n' for i in (a,b)))
+            def snapshot(parent):return json.dumps({'format':'cosyncx-active-graph-v1','omitted_missing':0,
+                'omitted_archived':0,'edges':[{'parent':parent,'child':child,'status':'closed'}]})
+            (graph/'graph.json').write_text(snapshot(a));(graph/'devices'/('a'*32+'.json')).write_text(snapshot(b))
+            with sqlite3.connect(profile/'state_5.sqlite') as db:
+                db.execute('CREATE TABLE threads (id TEXT,archived INTEGER)')
+            receiver=DirectReceiver(source=source,titles=titles,graph=graph,profile=profile,backup_root=backups,
+                key=b'k'*32,mappings=[('/source/Nexus',str(project))],codex=Path(sys.executable),
+                folder_ids=('sessions','titles','graph'),peer_id='vps')
+            with patch('cosync_direct_restore.quiescence.is_quiet',return_value=True), \
+                 patch('cosync_direct_restore.indexer._index_profile'):
+                self.assertEqual(receiver._receive(),2)
+            self.assertEqual(receiver.pending_busy_ids,{child})
+            local=ns._chat_catalog(profile,include_unsupported=True)
+            self.assertIn(a,local);self.assertIn(b,local);self.assertNotIn(child,local)
+
     def test_receive_does_not_reprepare_an_unchanged_verified_history(self):
         import hashlib
         with tempfile.TemporaryDirectory() as tmp:
