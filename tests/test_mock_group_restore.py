@@ -6,18 +6,16 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
 
 import mock_chat_sync as mock
 from mock_direct_receiver import MockDirectReceiver
-import mock_group_restore as group
 import nexus_sync as ns
 from test_codex_contract import read_rpc_response, stop_server
 
 
 @unittest.skipUnless(os.environ.get('NEXUS_TEST_CODEX') == '1' and shutil.which('codex'), 'requires disposable Codex')
 class GroupRestoreTests(unittest.TestCase):
-    def test_group_rolls_back_both_steps_and_indexes_together(self):
+    def test_receiver_keeps_archived_parent_archived(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-group-test-') as tmp:
             root = Path(tmp).resolve()
             profile, source, shared, backups, project = (root / x for x in
@@ -75,27 +73,9 @@ class GroupRestoreTests(unittest.TestCase):
                 call(3, 'thread/archive', {'threadId': parent})
             finally:
                 stop_server(server)
-            args = (source, profile, shared, backups, key, parent, [('/source/Nexus', str(project))], Path(codex))
-            real_child_restore = group.child_batch.restore
-            def fail_after_child(*args, **kwargs):
-                real_child_restore(*args, **kwargs)
-                raise RuntimeError('synthetic failure after child')
-            def crash_after_child(*args, **kwargs):
-                real_child_restore(*args, **kwargs)
-                raise KeyboardInterrupt()
-            with patch.object(group.child_batch, 'restore', side_effect=crash_after_child):
-                with self.assertRaises(KeyboardInterrupt):
-                    group.restore(*args, children=[child])
-            self.assertTrue((backups / 'mock-group-pending.json').is_file())
-            group.recover(profile, shared, backups, key)
-            self.assertFalse((backups / 'mock-group-pending.json').exists())
-            with patch.object(group.child_batch, 'restore', side_effect=fail_after_child):
-                with self.assertRaisesRegex(RuntimeError, 'synthetic failure'):
-                    group.restore(*args, children=[child])
             catalog = ns._chat_catalog(profile, include_unsupported=True)
             self.assertEqual([x['folder'] for x in catalog[parent]], ['archived_sessions'])
             self.assertNotIn(child, catalog)
-            self.assertFalse((backups / 'mock-group-pending.json').exists())
             receiver = MockDirectReceiver(source=source, profile=profile, shared=shared, key=key,
                 source_root='/source/Nexus', target_root=project, codex=codex,
                 folder_id='chats', peer_id='vps', backup_root=backups, quiet_seconds=0)
@@ -112,15 +92,14 @@ class GroupRestoreTests(unittest.TestCase):
             self.assertEqual(receiver.poll(read, now=1)['state'], 'PENDING')
             self.assertEqual(receiver.poll(read, now=2)['state'], 'WAITING')
             result = receiver.poll(read, now=3)
-            self.assertEqual(result['state'], 'COMPLETE')
-            self.assertTrue(result['restore_event']['indexed'])
-            self.assertEqual(result['restore_event']['changed_chats'], 2)
-            self.assertTrue(result['restore_event']['mock_only'])
-            self.assertFalse((backups / 'mock-group-pending.json').exists())
-            self.assertTrue((backups / 'latest' / 'manifest.json').is_file())
+            self.assertEqual(result['state'], 'PENDING')
+            self.assertNotIn('restore_event', result)
+            catalog = ns._chat_catalog(profile, include_unsupported=True)
+            self.assertEqual([item['folder'] for item in catalog[parent]], ['archived_sessions'])
+            self.assertNotIn(child, catalog)
             with sqlite3.connect(profile / 'state_5.sqlite') as db:
                 self.assertEqual(dict(db.execute('SELECT id, archived FROM threads WHERE id IN (?, ?)',
-                                                 (parent, child))), {parent: 0, child: 0})
+                                                 (parent, child))), {parent: 1})
 
 
 if __name__ == '__main__':

@@ -15,6 +15,51 @@ from test_codex_contract import read_rpc_response, stop_server
 
 
 class DirectRestoreTests(unittest.TestCase):
+    def test_existing_archived_history_is_not_made_active(self):
+        with tempfile.TemporaryDirectory(prefix='cosyncx-keep-archive-') as tmp:
+            root = Path(tmp).resolve()
+            source, titles, graph, profile, backups, project = (root / name for name in
+                ('source', 'titles', 'graph', 'profile', 'backups', 'project'))
+            for path in (source, titles, graph, profile, backups, project):
+                path.mkdir(mode=0o700)
+            active, archived = source / 'sessions', profile / 'archived_sessions'
+            active.mkdir(); archived.mkdir()
+            thread = '019b0000-0000-7000-8000-000000000021'
+            filename = f'rollout-2026-01-01T00-00-00-{thread}.jsonl'
+            def record(cwd):
+                return json.dumps({'timestamp': '2026-01-01T00:00:00.000Z', 'type': 'session_meta', 'ordinal': 0,
+                    'payload': {'id': thread, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': cwd,
+                                'originator': 'codex_vscode', 'cli_version': '0.1.0', 'source': 'vscode',
+                                'model_provider': 'openai', 'history_mode': 'paginated'}}) + '\n'
+            (active / filename).write_text(record('/source/Nexus'))
+            archived_file = archived / filename
+            archived_file.write_text(record(str(project)))
+            before = archived_file.read_bytes()
+            (titles / 'session_index.jsonl').write_text(json.dumps({'id': thread, 'thread_name': 'test'}) + '\n')
+            (graph / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1', 'edges': [],
+                'omitted_missing': 0, 'omitted_archived': 0}))
+            new_thread = '019b0000-0000-7000-8000-000000000022'
+            new_file = active / f'rollout-2026-01-01T00-00-00-{new_thread}.jsonl'
+            new_record = json.loads(record('/source/Nexus'))
+            new_record['payload']['id'] = new_thread
+            new_file.write_text(json.dumps(new_record) + '\n')
+            with (titles / 'session_index.jsonl').open('a') as stream:
+                stream.write(json.dumps({'id': new_thread, 'thread_name': 'new'}) + '\n')
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                db.execute('CREATE TABLE threads (id TEXT, archived INTEGER)')
+                db.execute('INSERT INTO threads VALUES (?, 1)', (thread,))
+            receiver = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
+                backup_root=backups, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
+                codex=Path(sys.executable), folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0)
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True), \
+                    patch('cosync_direct_restore.indexer._index_profile') as indexer:
+                self.assertEqual(receiver._receive(), 1)
+            indexer.assert_called_once()
+            self.assertEqual(indexer.call_args.args[1], new_thread)
+            self.assertEqual(archived_file.read_bytes(), before)
+            self.assertTrue((profile / 'sessions' / new_file.name).is_file())
+            self.assertFalse((profile / 'sessions' / filename).exists())
+
     def test_waits_for_syncthing_and_idle_profile_then_imports_and_confirms_index(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-direct-real-test-') as tmp:
             root = Path(tmp).resolve()

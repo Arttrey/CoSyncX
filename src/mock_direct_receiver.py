@@ -7,7 +7,6 @@ import cosync_auto_gate
 import cosync_receive_plan
 import cosync_restore_backup
 import mock_chat_sync as mock
-import mock_group_restore
 import mock_paginated_import as pages_import
 import mock_journal
 import nexus_sync as ns
@@ -95,9 +94,7 @@ class MockDirectReceiver:
             return False
         chats = {thread: entries for thread, entries in incoming.items() if kinds[thread] == 'chat'}
         subagents = {thread: entries for thread, entries in incoming.items() if kinds[thread] == 'subagent'}
-        # A single archived parent and its direct children can share one
-        # pre-group backup. Other groups remain pending until their complete
-        # transaction, including graph and report delivery, is supported.
+        # Recheck a previously restored single group. Archive status is kept.
         if subagents and len(chats) == 1 and self.backup_root is not None:
             parent = next(iter(chats))
             local = ns._chat_catalog(self.profile, include_unsupported=True).get(parent, [])
@@ -105,10 +102,9 @@ class MockDirectReceiver:
                          for items in subagents.values())
             if local and direct:
                 if all(item['folder'] == 'archived_sessions' for item in local):
-                    mock_group_restore.restore(self.source, self.profile, self.shared, self.backup_root, self.key,
-                        parent, [(self.source_root, str(self.target))], self.codex, children=sorted(subagents),
-                        title=titles.get(parent), flatten_multi=len(chats[parent]) > 1)
-                    return True
+                    # Local archival state is user data. Wait for an explicit
+                    # policy instead of silently making an archived chat active.
+                    return False
                 # A folder may change after indexing and before the second
                 # Syncthing check. Revalidate the already applied group without
                 # replacing the only backup or silently accepting divergence.

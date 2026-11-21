@@ -121,6 +121,24 @@ class DirectReceiver:
         names = {entry['id']: entry['thread_name'] for entry in ns._parse_title_index(title_bytes)}
         incoming = ns._chat_catalog(self.source, include_unsupported=True)
         local = ns._chat_catalog(self.profile, include_unsupported=True)
+        # A locally archived conversation stays archived even when the source
+        # has an active copy. It and its dependent children must not block
+        # unrelated active chats from being imported.
+        skipped = set()
+        for identity in incoming:
+            current = local.get(identity, [])
+            folders = {item['folder'] for item in current}
+            if 'archived_sessions' in folders:
+                if folders != {'archived_sessions'}:
+                    return None
+                skipped.add(identity)
+        while True:
+            dependent = {identity for identity, entries in incoming.items()
+                         if identity not in skipped and any(item.get('parent_thread_id') in skipped for item in entries)}
+            if not dependent:
+                break
+            skipped.update(dependent)
+        incoming = {identity: entries for identity, entries in incoming.items() if identity not in skipped}
         kinds = {identity: cosync_receive_plan.source_kind(entries) for identity, entries in incoming.items()}
         for identity, entries in incoming.items():
             if (kinds[identity] == 'subagent' and

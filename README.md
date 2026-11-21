@@ -24,8 +24,9 @@ it does not receive real chats. The optional macOS menu-bar status is read-only
 and reports Syncthing transfer progress, not successful restoration.
 The `direct-watch --experimental` prototype handles single-page new and active
 chats when Cursor and Codex are quiet. A differing source history or title is
-applied after backing up the local state. It defers archived IDs, nonempty
-relationship graphs, multi-page histories and missing-path reports.
+applied after backing up the local state. Locally archived IDs stay archived;
+source archives are not transferred. Nonempty relationship graphs, multi-page
+histories and missing-path reports remain unsupported.
 An indexed restore keeps its reload event until the status is published, but an
 interrupted write still requires manual recovery. The watcher is not installed
 or enabled automatically and must not be used on a real profile yet.
@@ -44,11 +45,10 @@ from the source are returned to the archive; incoming descendants and
 multi-page sources remain unsupported. On failure it attempts a mock-only
 rollback; if affected data no longer matches expected versions, it keeps an
 authenticated journal and blocks further backup rotation for review.
-The mock receiver can restore one archived parent and its previously active or
-missing direct children using one retained pre-group backup and per-step
-recovery journals. Incoming children already archived as descendants, multiple
-parent groups, nonempty relationship graphs, and path-report delivery still
-require a complete group implementation.
+The mock receiver leaves a locally archived chat archived when its incoming
+counterpart is active. Incoming children, multiple parent groups, nonempty
+relationship graphs, and path-report delivery still require a complete group
+implementation.
 The experimental `cosyncx prepare-lineage` command rewrites structured project
 paths and dependent byte offsets for a complete paginated thread into a new
 isolated directory. It does not import chats or rebuild the live Codex index.
