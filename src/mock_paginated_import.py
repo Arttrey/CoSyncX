@@ -464,7 +464,8 @@ def reset_mock_projection(profile: Path, shared: Path, backup_root: Path, key: b
     _reset_profile_projection(profile, backup_root, thread_id)
 
 
-def _reset_profile_projection(profile: Path, backup_root: Path, thread_id: str) -> None:
+def _reset_profile_projection(profile: Path, backup_root: Path, thread_id: str, *,
+                              ignore_busy: frozenset[str] = frozenset()) -> None:
     """Reset one verified projection after the caller has guarded and backed up the profile."""
     database = profile / 'thread_history_1.sqlite'
     latest = backup_root / 'latest'
@@ -490,7 +491,7 @@ def _reset_profile_projection(profile: Path, backup_root: Path, thread_id: str) 
         'thread_history_projection_state': {'thread_id', 'next_rollout_byte_offset', 'next_rollout_ordinal'},
         'thread_realtime_items': {'thread_id', 'item_id', 'rollout_ordinal', 'created_at_ms', 'item_type', 'item_json'},
     }
-    with mock._mock_thread_lock(profile, thread_id):
+    with mock._mock_thread_lock(profile, thread_id, ignore_busy=ignore_busy):
         with closing(sqlite3.connect(database, timeout=1)) as db, db:
             db.execute('BEGIN IMMEDIATE')
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
@@ -525,7 +526,8 @@ def index_thread(profile: Path, shared: Path, key: bytes, thread_id: str,
 
 
 def _index_profile(profile: Path, thread_id: str, executable: Path, *, title: str | None = None,
-                   allow_title_change: bool = False, on_verified=None) -> None:
+                   allow_title_change: bool = False, on_verified=None,
+                   ignore_busy: frozenset[str] = frozenset()) -> None:
     """Codex index operation; caller must validate and coordinate the profile."""
     if title is not None:
         if not isinstance(title, str) or not title:
@@ -554,7 +556,7 @@ def _index_profile(profile: Path, thread_id: str, executable: Path, *, title: st
     expected_messages = _expected_visible_messages(leaf['path'], subagent=kind == 'subagent')
     if kind == 'chat' and not any(key.startswith('user:') for key in expected_messages):
         raise ns.SyncError('Mock conversation has no verifiable user messages')
-    with mock._mock_thread_lock(profile, thread_id):
+    with mock._mock_thread_lock(profile, thread_id, ignore_busy=ignore_busy):
         pass
     env = {name: value for name, value in os.environ.items()
            if name not in ('CODEX_HOME', 'OPENAI_API_KEY', 'OPENAI_ADMIN_KEY', 'CHATGPT_ACCESS_TOKEN')}

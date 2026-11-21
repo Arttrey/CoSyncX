@@ -66,6 +66,8 @@ class DirectReceiver:
         self.verified = {}
         self.pending_result = None
         self.unresolved_archived_count = 0
+        self.pending_busy_ids = frozenset()
+        self._ignored_busy = frozenset()
         self.path_warning_count = 0
         report = self.backup_root / 'missing-paths.json'
         if report.is_file() and not report.is_symlink():
@@ -222,7 +224,8 @@ class DirectReceiver:
             identity, title = queue[index]
             if not quiescence.is_quiet():
                 return None
-            indexer._index_profile(self.profile, identity, self.codex, title=title, allow_title_change=True)
+            indexer._index_profile(self.profile, identity, self.codex, title=title, allow_title_change=True,
+                                   ignore_busy=self._ignored_busy)
             current = ns._chat_catalog(self.profile, include_unsupported=True).get(identity, [])
             if len(current) != 1 or current[0]['folder'] != 'sessions':
                 raise ns.SyncError('Direct indexed history unavailable')
@@ -242,7 +245,8 @@ class DirectReceiver:
             with tempfile.TemporaryDirectory(prefix='cosyncx-active-graph-') as tmp:
                 filtered = Path(tmp) / 'graph.json'
                 filtered.write_text(json.dumps({**graph, 'edges': edges}), encoding='utf-8')
-                mock_graph_restore._apply_graph(self.profile, self.backup_root, filtered, use_existing_backup=True)
+                mock_graph_restore._apply_graph(self.profile, self.backup_root, filtered, use_existing_backup=True,
+                                                ignore_busy=self._ignored_busy)
         record['phase'] = 'indexed'
         self._write_journal(record)
         return len(record['threads'])
@@ -426,6 +430,16 @@ class DirectReceiver:
             skipped.update(set(incoming) & archived_ids)
         self.unresolved_archived_count = sum(identity in skipped and identity not in self.excluded_thread_ids
                                              and source_kinds[identity] == 'chat' for identity in incoming)
+        self.pending_busy_ids = frozenset()
+        self._ignored_busy = frozenset()
+        if set(incoming) - skipped:
+            try:
+                if quiescence.is_quiet():
+                    self._ignored_busy = frozenset(locking._busy_thread_ids(self.profile))
+                    self.pending_busy_ids = frozenset((set(incoming) - skipped) & self._ignored_busy)
+                    skipped.update(self.pending_busy_ids)
+            except (quiescence.QuiescenceError, locking.MockChatBusy, FileNotFoundError):
+                return None
         for identity, entries in incoming.items():
             if source_kinds[identity] == 'subagent' and entries[0].get('parent_thread_id') not in incoming:
                 skipped.add(identity)
@@ -554,7 +568,8 @@ class DirectReceiver:
                         return None
                     if not quiescence.is_quiet():
                         return None
-                    indexer._index_profile(self.profile, identity, self.codex, title=item.get('title'))
+                    indexer._index_profile(self.profile, identity, self.codex, title=item.get('title'),
+                                           ignore_busy=self._ignored_busy)
                     self.verified[identity] = (ns._digest(current[0]['path']), item.get('title'))
                 events = self._read_carry()
                 if prior['threads'] and all(event['id'] != prior['event_id'] for event in events):
@@ -584,7 +599,8 @@ class DirectReceiver:
                     return None
                 if not quiescence.is_quiet():
                     return None
-                indexer._index_profile(self.profile, identity, self.codex, title=item['title'])
+                indexer._index_profile(self.profile, identity, self.codex, title=item['title'],
+                                       ignore_busy=self._ignored_busy)
                 item['digest'] = ns._digest(current[0]['path'])
                 self.verified[identity] = (item['digest'], item['title'])
             if edges:
@@ -698,7 +714,7 @@ class DirectReceiver:
                     return None
             except quiescence.QuiescenceError:
                 return None
-            with locking._mock_thread_lock(self.profile, lock_id):
+            with locking._mock_thread_lock(self.profile, lock_id, ignore_busy=self._ignored_busy):
                 if not quiescence.is_quiet():
                     return None
                 current_ids = ns._chat_catalog(self.profile, include_unsupported=True)
@@ -784,7 +800,8 @@ class DirectReceiver:
                 if replacement is not None:
                     if not quiescence.is_quiet():
                         raise ns.SyncError('Codex started during direct restore')
-                    indexer._reset_profile_projection(self.profile, self.backup_root, identity)
+                    indexer._reset_profile_projection(self.profile, self.backup_root, identity,
+                                                      ignore_busy=self._ignored_busy)
             verified = {identity: {'digest': item[0], 'title': item[1]}
                         for identity, item in self.verified.items() if identity in incoming}
             to_index = [(identity, title) for identity, _, _, title in prepared]
@@ -817,11 +834,17 @@ class DirectReceiver:
         observations = observe()
         revision = self.gate.observe(observations, now=now)
         if revision is None:
+            if self.gate.is_current(now=now) and self.pending_busy_ids:
+                self.gate.request_retry()
+                return {'state': 'PENDING', 'mock_only': False}
             state = ('PENDING' if self.unresolved_archived_count else 'CURRENT') if self.gate.is_current(now=now) else 'WAITING'
             return {'state': state, 'mock_only': False}
         if on_restore is not None:
             on_restore()
-        count = self._receive()
+        try:
+            count = self._receive()
+        except locking.MockChatBusy:
+            return {'state': 'PENDING', 'mock_only': False}
         if count is None:
             return {'state': 'PENDING', 'mock_only': False}
         record = self._read_journal()
@@ -837,7 +860,7 @@ class DirectReceiver:
             if not carry and (not record or record.get('phase') != 'indexed'):
                 raise ns.SyncError('Direct restore confirmation unavailable')
             event['id'] = carry[0]['id'] if carry else record['event_id']
-        if event is None and self.unresolved_archived_count:
+        if event is None and (self.unresolved_archived_count or self.pending_busy_ids):
             return {'state': 'PENDING', 'mock_only': False}
         result = {'state': 'COMPLETE', 'mock_only': False, 'restore_event': event}
         if carry or (record and record.get('phase') == 'indexed'):

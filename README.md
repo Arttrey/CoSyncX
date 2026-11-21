@@ -35,6 +35,11 @@ and the report location. The report retains prior warnings for review.
 `--exclude-thread-id ID` keeps a selected local conversation and its dependent
 sessions untouched. This is useful for a conversation continued on another
 device; changing its display name does not change its ID.
+When an individual writer lock is held, the receiver defers that conversation
+and its dependent sessions, processes eligible independent chats, and retries
+without requiring another Syncthing change. The current real-profile watcher
+still waits while Cursor or Codex is running; concurrent use has only been
+tested on disposable profiles.
 An indexed restore keeps its reload event until the status is published. An
 interrupted indexing pass retains its authenticated metadata so it can finish
 before a newer source revision is processed, provided the local state has not

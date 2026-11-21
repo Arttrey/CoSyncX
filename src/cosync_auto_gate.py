@@ -148,3 +148,8 @@ class MultiFolderGate:
         if self._current is None or self._since is None or now - self._since < self.quiet_seconds:
             return False
         return tuple((folder, remote) for folder, remote, _ in self._current) == self._completed
+
+    def request_retry(self) -> None:
+        """Recheck pending chats even if the received revision did not change."""
+        self._completed = None
+        self._eligible = False

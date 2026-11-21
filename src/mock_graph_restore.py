@@ -24,7 +24,8 @@ def apply_graph(profile: Path, shared: Path, backup_root: Path, graph_file: Path
     return _apply_graph(profile, backup_root, graph_file, use_existing_backup=use_existing_backup)
 
 
-def _apply_graph(profile: Path, backup_root: Path, graph_file: Path, *, use_existing_backup: bool = False) -> int:
+def _apply_graph(profile: Path, backup_root: Path, graph_file: Path, *, use_existing_backup: bool = False,
+                 ignore_busy: frozenset[str] = frozenset()) -> int:
     """Apply validated links after the caller has guarded and backed up the profile."""
     before = graph_file.stat()
     raw = graph_file.read_bytes()
@@ -63,7 +64,7 @@ def _apply_graph(profile: Path, backup_root: Path, graph_file: Path, *, use_exis
     database = profile / 'state_5.sqlite'
     if database.is_symlink() or not database.is_file():
         raise ns.SyncError('Mock state database is unavailable')
-    with mock._mock_thread_lock(profile, edges[0][0]):
+    with mock._mock_thread_lock(profile, edges[0][0], ignore_busy=ignore_busy):
         with sqlite3.connect(database, timeout=1) as db:
             db.execute('BEGIN IMMEDIATE')
             cols = {row[1] for row in db.execute('PRAGMA table_info(thread_spawn_edges)')}

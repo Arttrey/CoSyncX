@@ -28,6 +28,10 @@ class MockChatConflict(ns.SyncError):
     """A specific mock chat has divergent histories."""
 
 
+class MockChatBusy(ns.SyncError):
+    """A writer lock is held; the affected work can be retried."""
+
+
 def _mock_path(path: Path) -> Path:
     parent = path.parent.resolve(strict=True)
     result = parent / path.name
@@ -68,13 +72,64 @@ def _validate_profile(path: Path, key: bytes) -> Path:
     return profile
 
 
+def _busy_thread_ids(profile: Path) -> set[str]:
+    """Inspect existing writer locks without creating or changing lock files."""
+    if sys.platform not in ('linux', 'darwin'):
+        raise ns.SyncError('Writer lock inspection is unavailable')
+    import fcntl
+    directory = profile / 'thread-writer-locks'
+    if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+        raise ns.SyncError('Invalid writer lock directory')
+    if not directory.exists():
+        return set()
+    opened = []
+    try:
+        root_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        opened.append(root_fd)
+        names = set(os.listdir(root_fd))
+        if any(name.endswith('.lock') and name != '.coordination.lock'
+               and not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.lock', name)
+               for name in names):
+            raise ns.SyncError('Unknown writer lock')
+        if '.coordination.lock' in names:
+            fd = os.open('.coordination.lock', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
+            opened.append(fd)
+            if not stat.S_ISREG(os.fstat(fd).st_mode): raise ns.SyncError('Invalid writer coordination lock')
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise MockChatBusy('Writer coordination is busy') from exc
+        elif any(name.endswith('.lock') for name in names):
+            raise ns.SyncError('Writer coordination lock is missing')
+        busy = set()
+        for name in sorted(names - {'.coordination.lock'}):
+            if not name.endswith('.lock'):
+                continue
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode): raise ns.SyncError('Invalid writer lock')
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    busy.add(name[:-5])
+            finally:
+                os.close(fd)
+        return busy
+    finally:
+        for fd in reversed(opened): os.close(fd)
+
+
 @contextmanager
-def _mock_thread_lock(profile: Path, thread_id: str):
+def _mock_thread_lock(profile: Path, thread_id: str, *, ignore_busy: frozenset[str] = frozenset()):
     if sys.platform not in ('linux', 'darwin'):
         raise ns.SyncError('Опыт с блокировкой доступен только на Linux и macOS')
     import fcntl
     if not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', thread_id):
         raise ns.SyncError('Некорректный ID чата')
+    if (not isinstance(ignore_busy, (set, frozenset)) or thread_id in ignore_busy
+            or any(not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', value)
+                   for value in ignore_busy)):
+        raise ns.SyncError('Invalid ignored writer locks')
     flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
     opened = []
     root_fd = directory_fd = None
@@ -93,12 +148,12 @@ def _mock_thread_lock(profile: Path, thread_id: str):
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
-                raise ns.SyncError('Моковый чат занят; применение отложено') from exc
+                raise MockChatBusy('Моковый чат занят; применение отложено') from exc
         names = set(os.listdir(directory_fd))
         other_locks = {name for name in names if re.fullmatch(r'[0-9a-fA-F-]{36}\.lock', name)}
         if any(name.endswith('.lock') and name != '.coordination.lock' and name not in other_locks for name in names):
             raise ns.SyncError('Неизвестная блокировка мокового профиля')
-        for name in sorted(other_locks | {thread_id + '.lock'}):
+        for name in sorted((other_locks - {identity + '.lock' for identity in ignore_busy}) | {thread_id + '.lock'}):
             fd = os.open(name, flags, 0o600, dir_fd=directory_fd)
             opened.append(fd)
             if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -106,7 +161,7 @@ def _mock_thread_lock(profile: Path, thread_id: str):
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
-                raise ns.SyncError('Моковый профиль занят; применение отложено') from exc
+                raise MockChatBusy('Моковый профиль занят; применение отложено') from exc
         yield
     finally:
         for fd in reversed(opened):

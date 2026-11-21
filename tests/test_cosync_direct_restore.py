@@ -16,6 +16,60 @@ from test_codex_contract import read_rpc_response, stop_server
 
 
 class DirectRestoreTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform in ('linux', 'darwin'), 'requires Unix writer locks')
+    def test_busy_chat_is_retried_without_blocking_an_independent_chat(self):
+        import fcntl
+        with tempfile.TemporaryDirectory(prefix='cosyncx-busy-queue-') as tmp:
+            root = Path(tmp).resolve()
+            source, titles, graph, profile, backups, project = (root / name for name in
+                ('source', 'titles', 'graph', 'profile', 'backups', 'project'))
+            for path in (source, titles, graph, profile, backups, project): path.mkdir(mode=0o700)
+            incoming = source / 'sessions'; incoming.mkdir()
+            busy, free = ('019b0000-0000-7000-8000-0000000000d1', '019b0000-0000-7000-8000-0000000000d2')
+            for identity in (busy, free):
+                meta = {'id': identity, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': '/source/Nexus',
+                        'originator': 'codex_vscode', 'cli_version': '0.1.0', 'source': 'vscode',
+                        'model_provider': 'openai', 'history_mode': 'paginated'}
+                (incoming / f'rollout-2026-01-01T00-00-00-{identity}.jsonl').write_text(json.dumps(
+                    {'timestamp': meta['timestamp'], 'type': 'session_meta', 'payload': meta, 'ordinal': 0}) + '\n')
+            (titles / 'session_index.jsonl').write_text(''.join(
+                json.dumps({'id': identity, 'thread_name': 'test'}) + '\n' for identity in (busy, free)))
+            (graph / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1', 'edges': [],
+                'omitted_missing': 0, 'omitted_archived': 0}))
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                db.execute('CREATE TABLE threads (id TEXT, archived INTEGER)')
+            lockdir = profile / 'thread-writer-locks'; lockdir.mkdir()
+            (lockdir / '.coordination.lock').touch()
+            receiver = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
+                backup_root=backups, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
+                codex=Path(sys.executable), folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0)
+            status = {'state': 'idle', 'sequence': 1, 'remoteSequence': {'vps': 1}, 'needFiles': 0,
+                      'needDirectories': 0, 'needSymlinks': 0, 'needDeletes': 0, 'errors': 0, 'pullErrors': 0}
+            def read(folder): return lambda: (folder, status, True, 'valid')
+            readers = [read(folder) for folder in ('sessions', 'titles', 'graph')]
+            def poll(now): return receiver.poll(readers[0], title_status_reader=readers[1], graph_status_reader=readers[2], now=now)
+            def index(_profile, identity, _codex, *, title, **_kwargs):
+                with (profile / 'session_index.jsonl').open('a') as stream:
+                    stream.write(json.dumps({'id': identity, 'thread_name': title}) + '\n')
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True), \
+                    patch('cosync_direct_restore.indexer._index_profile', side_effect=index) as indexer:
+                with (lockdir / (busy + '.lock')).open('a+b') as stream:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self.assertEqual(poll(0)['state'], 'WAITING')
+                    first = poll(1)
+                    self.assertEqual(first['state'], 'COMPLETE')
+                    self.assertEqual(first['restore_event']['changed_chats'], 1)
+                    self.assertEqual(indexer.call_args.args[1], free)
+                    self.assertNotIn(busy, ns._chat_catalog(profile, include_unsupported=True))
+                    receiver.acknowledge(first['restore_event'])
+                    self.assertEqual(poll(2)['state'], 'PENDING')
+                second = poll(3)
+                self.assertEqual(second['state'], 'COMPLETE')
+                self.assertEqual(second['restore_event']['changed_chats'], 1)
+                self.assertEqual(indexer.call_args.args[1], busy)
+                receiver.acknowledge(second['restore_event'])
+            self.assertEqual(set(ns._chat_catalog(profile, include_unsupported=True)), {busy, free})
+
     def test_active_source_archived_locally_does_not_report_complete(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-pending-archived-') as tmp:
             root = Path(tmp).resolve()
