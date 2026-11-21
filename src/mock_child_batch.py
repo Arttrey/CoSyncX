@@ -21,7 +21,8 @@ import nexus_sync as ns
 
 
 def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: bytes,
-            parent: str, mappings: list[tuple[str, str]], executable: Path, *, children: list[str]) -> int:
+            parent: str, mappings: list[tuple[str, str]], executable: Path, *, children: list[str],
+            parents: dict[str, str] | None = None) -> int:
     source = mock._mock_path(source)
     profile = mock._validate_profile(profile, key)
     shared, backup_root = mock._mock_path(shared), mock._mock_path(backup_root)
@@ -33,19 +34,28 @@ def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: b
                    ((source, profile), (source, shared), (source, backup_root), (profile, shared),
                     (profile, backup_root), (shared, backup_root)))):
         raise ns.SyncError('Invalid mock child batch')
+    if parents is None:
+        parents = {child: parent for child in children}
+    if (not isinstance(parents, dict) or set(parents) != set(children)
+            or any(not graph._uuid(value) or value in children for value in parents.values())
+            or parent not in parents.values()):
+        raise ns.SyncError('Invalid mock child parents')
+    parents = dict(parents)
+    children = list(children)
     mock_journal.ensure_clear(backup_root)
     source_catalog = ns._chat_catalog(source, include_unsupported=True)
     local_catalog = ns._chat_catalog(profile, include_unsupported=True)
-    if parent not in local_catalog or any(item['folder'] != 'sessions' for item in local_catalog[parent]):
-        raise ns.SyncError('Mock parent is not active')
+    for parent_id in set(parents.values()):
+        if parent_id not in local_catalog or any(item['folder'] != 'sessions' for item in local_catalog[parent_id]):
+            raise ns.SyncError('Mock parent is not active')
     with sqlite3.connect((profile / 'state_5.sqlite').as_uri() + '?mode=ro', uri=True) as db:
         states = dict(db.execute('SELECT id, archived FROM threads'))
-    if states.get(parent) != 0:
+    if any(states.get(parent_id) != 0 for parent_id in parents.values()):
         raise ns.SyncError('Mock parent is not indexed')
     before = {}
     for identity in children:
         incoming, current = source_catalog.get(identity, []), local_catalog.get(identity, [])
-        if (len(incoming) != 1 or incoming[0].get('parent_thread_id') != parent
+        if (len(incoming) != 1 or incoming[0].get('parent_thread_id') != parents[identity]
                 or cosync_receive_plan.source_kind(incoming) != 'subagent'):
             raise ns.SyncError('Unsupported mock child source')
         if current:
@@ -98,7 +108,7 @@ def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: b
                 if title_existed and ns._digest(title) != manifest.get(title.name):
                     raise ns.SyncError('Mock child title state changed during backup')
             latest = backup.replace_latest(profile, backup_root, names, pre_commit=verify)
-        data = {'version': 1, 'parent': parent, 'children': children, 'before': before, 'targets': targets,
+        data = {'version': 1, 'parent': parent, 'parents': parents, 'children': children, 'before': before, 'targets': targets,
                 'source_digests': source_digests, 'verified_digests': {}, 'title_existed': title_existed,
                 'backup_manifest_digest': archive._stable_digest(latest / 'manifest.json')}
         data['authentication'] = ns._manifest_tag(data, key)
@@ -175,6 +185,10 @@ def rollback(profile: Path, shared: Path, backup_root: Path, key: bytes) -> None
     if (not graph._uuid(parent) or not isinstance(children, list) or not children
             or any(not graph._uuid(x) or x == parent for x in children) or len(set(children)) != len(children)):
         raise ns.SyncError('Invalid mock child journal identities')
+    parents = data.get('parents', {child: parent for child in children})
+    if (not isinstance(parents, dict) or set(parents) != set(children) or parent not in parents.values()
+            or any(not graph._uuid(value) or value in children for value in parents.values())):
+        raise ns.SyncError('Invalid mock child journal parents')
     for field in ('before', 'targets', 'source_digests', 'verified_digests'):
         if not isinstance(data.get(field), dict): raise ns.SyncError('Invalid mock child journal data')
     if (set(data['before']) != set(children) or set(data['targets']) != set(children)
