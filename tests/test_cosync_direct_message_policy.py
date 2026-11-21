@@ -42,6 +42,10 @@ class DirectMessagePolicyTests(unittest.TestCase):
                 self.assertFalse(receiver._retire_unchanged_indexing(changed, journal))
                 self.assertTrue(journal.exists())
                 self.assertTrue(receiver._retire_unchanged_indexing(record, journal))
+                journal.write_text('journal')
+                indexed = {**record, 'phase': 'indexed'}
+                receiver._read_journal.return_value = indexed
+                self.assertTrue(receiver._retire_unchanged_indexing(indexed, journal))
             self.assertFalse(journal.exists())
             self.assertEqual(receiver.verified[identity], (digest, 'name'))
             self.assertEqual(history.read_text(), 'unchanged')

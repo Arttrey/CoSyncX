@@ -229,14 +229,14 @@ class DirectReceiver:
         return hashlib.sha256(raw).hexdigest() if raw is not None else None
 
     def _retire_unchanged_indexing(self, record, journal):
-        """Retire an interrupted verification-only pass without touching chats.
+        """Retire a verification-only pass without touching chats.
 
         Only entries that are still present and indexed can be reused. A pass
         that changed a chat or its relationships always follows normal recovery.
         """
         operations, verified = record.get('operations'), record.get('verified')
         snapshot = record.get('index_snapshot')
-        if (record.get('phase') != 'indexing' or record.get('threads') != [] or record.get('paths') != []
+        if (record.get('phase') not in ('indexing', 'indexed') or record.get('threads') != [] or record.get('paths') != []
                 or not isinstance(operations, list) or not operations
                 or any(not isinstance(op, dict) or op.get('before') is None or op.get('before') != op.get('after')
                        for op in operations)
@@ -449,9 +449,9 @@ class DirectReceiver:
         prior = self._read_journal() if journal.exists() or journal.is_symlink() else None
         if (journal.exists() or journal.is_symlink()) and not prior:
             return None
-        if prior is not None and prior.get('phase') == 'indexing':
+        if prior is not None and prior.get('phase') in ('indexing', 'indexed'):
             db_names = {name.removesuffix('-wal') for name in prior.get('database_state', {})}
-            if (self._database_state(db_names) != prior.get('database_state')
+            if (prior['phase'] == 'indexed' or self._database_state(db_names) != prior.get('database_state')
                     or self._title_state() != prior.get('local_title_state')):
                 if self._retire_unchanged_indexing(prior, journal):
                     prior = None
