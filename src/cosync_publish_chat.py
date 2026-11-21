@@ -84,17 +84,26 @@ def main():
     if not 10 <= args.interval <= 3600:
         parser.error('Interval must be between 10 and 3600 seconds')
     while True:
+        reason = None
         try:
             result = publish(args.source, args.destination, args.state_dir, replace_initial=args.replace_initial)
-        except (OSError, ValueError, ns.SyncError):
+        except ns.SyncError as exc:
             result = 'RETRY'
+            reason = ('SOURCE_CHANGED' if 'изменилась во время копирования' in str(exc) else
+                      'INCOMPLETE_HISTORY' if 'незавершённую запись' in str(exc) else 'VALIDATION_FAILED')
+        except OSError as exc:
+            result = 'RETRY'
+            reason = 'OS_ERROR_' + str(exc.errno or 0)
+        except ValueError:
+            result = 'RETRY'
+            reason = 'INVALID_STATE'
         try:
             path = args.state_dir / 'health.json'
             if path.is_symlink(): raise ns.SyncError('Invalid publisher status')
             fd, temporary = tempfile.mkstemp(prefix='.health-', dir=args.state_dir)
             try:
                 with os.fdopen(fd, 'w') as stream:
-                    json.dump({'state': result, 'updated_at_ms': int(time.time() * 1000)}, stream)
+                    json.dump({'state': result, 'reason': reason, 'updated_at_ms': int(time.time() * 1000)}, stream)
                 os.replace(temporary, path)
             finally:
                 if os.path.exists(temporary): os.unlink(temporary)
