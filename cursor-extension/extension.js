@@ -49,7 +49,8 @@ function activate(context) {
             }
             const labels = { TRANSFERRING: '$(sync~spin) CoSyncX: передача',
                 RESTORING: '$(sync~spin) CoSyncX: восстановление', PENDING: '$(warning) CoSyncX: ожидание',
-                COMPLETE: '$(check) CoSyncX: синхронизировано', ERROR: '$(warning) CoSyncX: ошибка' };
+                COMPLETE: status.restore_event ? '$(check) CoSyncX: восстановлено' : '$(check) CoSyncX: передача завершена',
+                ERROR: '$(warning) CoSyncX: ошибка' };
             item.text = labels[status.state];
             item.tooltip = 'Локальный статус CoSyncX';
             if (status.missing_path_chats) {

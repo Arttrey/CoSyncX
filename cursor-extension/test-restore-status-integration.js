@@ -46,9 +46,14 @@ const waitFor = async predicate => {
         extension.activate(context);
         await waitFor(() => calls.length === 1);
         assert.deepStrictEqual(calls, ['workbench.action.reloadWindow']);
-        assert.strictEqual(statusItem.text, '$(check) CoSyncX: синхронизировано');
+        assert.strictEqual(statusItem.text, '$(check) CoSyncX: восстановлено');
         refresh();
         await new Promise(resolve => setTimeout(resolve, 50));
+        assert.strictEqual(calls.length, 1);
+        fs.writeFileSync(file, JSON.stringify({format: 'cosyncx-restore-status-v1', updated_at_ms: Date.now(),
+            mock_only: false, state: 'COMPLETE', restore_event: null}));
+        refresh();
+        await waitFor(() => statusItem.text === '$(check) CoSyncX: передача завершена');
         assert.strictEqual(calls.length, 1);
         fs.writeFileSync(file, JSON.stringify({format: 'cosyncx-restore-status-v1', updated_at_ms: Date.now(),
             mock_only: false, state: 'COMPLETE', restore_event: event, missing_path_chats: 1,
