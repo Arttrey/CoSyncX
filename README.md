@@ -38,6 +38,10 @@ isolated directory. It does not import chats or rebuild the live Codex index.
 counts candidate conversations, subagent threads and existing archived or active
 IDs without changing the profile. This inventory does not establish that the
 Syncthing transfer is complete or that chats are indexed.
+`cosyncx archive-plan --profile CODEX_HOME --thread-id ID` counts affected
+threads and local history files before an unarchive operation. It is read-only;
+an actual restore would need to recheck and back up the full affected set while
+the profile is safely offline.
 
 `cosyncx extensions export` can create a separately encrypted bundle of custom
 skills, hooks, rules, plugin files, `AGENTS.md` and `config.toml`. The config can

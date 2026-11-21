@@ -9,6 +9,7 @@ import cosync_extensions
 import cosync_lineage
 import cosync_receive_plan
 import cosync_graph_snapshot
+import cosync_archive_plan
 
 
 def main(argv=None) -> int:
@@ -27,6 +28,8 @@ def main(argv=None) -> int:
         return cosync_receive_plan.main(arguments[1:])
     if arguments and arguments[0] == 'graph-snapshot':
         return cosync_graph_snapshot.main(arguments[1:])
+    if arguments and arguments[0] == 'archive-plan':
+        return cosync_archive_plan.main(arguments[1:])
     return nexus_sync.main(arguments)
 
 
