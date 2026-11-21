@@ -12,6 +12,46 @@ import nexus_sync as ns
 
 
 class ChildBatchTests(unittest.TestCase):
+    def test_missing_child_workspace_is_reported_when_fallback_enabled(self):
+        with tempfile.TemporaryDirectory(prefix='cosyncx-child-path-') as tmp:
+            root = Path(tmp).resolve()
+            source, profile, shared, backups, project = (root / name for name in
+                ('source', 'profile', 'shared', 'backup', 'project'))
+            for path in (source, shared, backups, project): path.mkdir(mode=0o700)
+            key = b'c' * 32
+            mock.init_mock_profile(profile, key, shared)
+            parent, child = ('019b0000-0000-7000-8000-000000000011', '019b0000-0000-7000-8000-000000000012')
+            def history(home, identity, cwd, child_of=None):
+                folder = home / 'sessions'; folder.mkdir(exist_ok=True)
+                meta = {'id': identity, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': cwd,
+                        'originator': 'codex_vscode', 'cli_version': '0.1.0',
+                        'source': {'subagent': {'other': 'guardian'}} if child_of else 'vscode',
+                        'model_provider': 'openai', 'history_mode': 'paginated'}
+                if child_of: meta['parent_thread_id'] = child_of
+                (folder / f'rollout-2026-01-01T00-00-00-{identity}.jsonl').write_text(json.dumps(
+                    {'timestamp': meta['timestamp'], 'type': 'session_meta', 'payload': meta, 'ordinal': 0}) + '\n')
+            history(profile, parent, str(project))
+            history(source, child, '/foreign/missing', parent)
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                db.execute('CREATE TABLE threads (id TEXT PRIMARY KEY, archived INTEGER)')
+                db.execute('INSERT INTO threads VALUES (?, 0)', (parent,))
+                db.execute('INSERT INTO threads VALUES (?, 0)', (child,))
+            def index(_profile, _shared, _key, identity, _executable, *, on_verified):
+                with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                    db.execute('INSERT OR IGNORE INTO threads VALUES (?, 0)', (identity,))
+                on_verified()
+            reports = {}
+            with patch.object(batch.pages, 'index_thread', side_effect=index), \
+                    patch.object(batch.pages, 'reset_mock_projection') as reset:
+                self.assertEqual(batch.restore(source, profile, shared, backups, key, parent,
+                    [('/source/Nexus', str(project))], Path(sys.executable), children=[child],
+                    fallback_root=project, path_reports=reports), 1)
+            self.assertEqual(reset.call_count, 1)
+            self.assertEqual(reports[child]['unmapped_working_directories'], ['/foreign/missing'])
+            self.assertEqual(reports[child]['authentication'], ns._manifest_tag(reports[child], key))
+            saved = json.loads(next((profile / 'sessions').glob('*' + child + '.jsonl')).read_text())
+            self.assertEqual(saved['payload']['cwd'], str(project))
+
     def test_interruption_restores_existing_child_and_removes_new_child(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-child-test-') as tmp:
             root = Path(tmp).resolve()

@@ -23,7 +23,8 @@ import nexus_sync as ns
 def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: bytes,
             parent: str, mappings: list[tuple[str, str]], executable: Path, *, children: list[str],
             parents: dict[str, str] | None = None, retain_journal: bool = False,
-            defer_rollback: bool = False) -> int:
+            defer_rollback: bool = False, fallback_root: Path | None = None,
+            path_reports: dict | None = None) -> int:
     source = mock._mock_path(source)
     profile = mock._validate_profile(profile, key)
     shared, backup_root = mock._mock_path(shared), mock._mock_path(backup_root)
@@ -37,6 +38,8 @@ def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: b
         raise ns.SyncError('Invalid mock child batch')
     if parents is None:
         parents = {child: parent for child in children}
+    if path_reports is not None and not isinstance(path_reports, dict):
+        raise ns.SyncError('Invalid mock child report destination')
     if (not isinstance(parents, dict) or set(parents) != set(children)
             or any(not graph._uuid(value) or value in children for value in parents.values())
             or parent not in parents.values()):
@@ -53,7 +56,7 @@ def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: b
         states = dict(db.execute('SELECT id, archived FROM threads'))
     if any(states.get(parent_id) != 0 for parent_id in parents.values()):
         raise ns.SyncError('Mock parent is not indexed')
-    before = {}
+    before, stale_ids = {}, set()
     for identity in children:
         incoming, current = source_catalog.get(identity, []), local_catalog.get(identity, [])
         if (len(incoming) != 1 or incoming[0].get('parent_thread_id') != parents[identity]
@@ -64,7 +67,10 @@ def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: b
                 raise ns.SyncError('Mock child versions are ambiguous')
             before[identity] = current[0]['path'].relative_to(profile).as_posix()
         elif identity in states:
-            raise ns.SyncError('Mock missing child has stale state')
+            if states[identity] != 0:
+                raise ns.SyncError('Mock missing child is archived or has an unknown state')
+            before[identity] = None
+            stale_ids.add(identity)
         else:
             before[identity] = None
     journal = backup_root / 'mock-child-pending.json'
@@ -72,9 +78,22 @@ def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: b
         staged, targets, source_digests = {}, {}, {}
         for number, identity in enumerate(children):
             dest = Path(tmp).resolve() / str(number)
-            lineage.prepare_lineage(source, dest, identity, mappings)
-            if (dest / 'cosyncx-path-report.json').exists():
-                raise ns.SyncError('Mock child path report needs delivery')
+            lineage.prepare_lineage(source, dest, identity, mappings, fallback_root=fallback_root)
+            report_path = dest / 'cosyncx-path-report.json'
+            if report_path.exists():
+                if path_reports is None or report_path.is_symlink() or not report_path.is_file():
+                    raise ns.SyncError('Mock child path report needs delivery')
+                report = json.loads(report_path.read_bytes())
+                if (not isinstance(report, dict) or report.get('version') != 1
+                        or type(report.get('fallback_used')) is not bool
+                        or not isinstance(report.get('unmapped_working_directories'), list)
+                        or not isinstance(report.get('unavailable_local_files'), list)
+                        or any(not isinstance(value, str) for value in report['unmapped_working_directories']
+                               + report['unavailable_local_files'])):
+                    raise ns.SyncError('Invalid mock child path report')
+                payload = {'format': 'cosyncx-mock-path-report-v1', 'thread': identity, **report}
+                payload['authentication'] = ns._manifest_tag(payload, key)
+                path_reports[identity] = payload
             incoming = ns._chat_catalog(dest, include_unsupported=True).get(identity, [])
             if len(incoming) != 1 or incoming[0]['folder'] != 'sessions':
                 raise ns.SyncError('Mock child preparation failed')
@@ -141,7 +160,7 @@ def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: b
                         os.replace(temporary, target)
                 finally:
                     temporary.unlink(missing_ok=True)
-                if before[identity] is not None:
+                if before[identity] is not None or identity in stale_ids:
                     pages.reset_mock_projection(profile, shared, backup_root, key, identity)
                 def mark_verified(identity=identity, target=target):
                     data['verified_digests'][identity] = archive._stable_digest(target)

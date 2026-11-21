@@ -26,6 +26,7 @@ class GroupReportRecoveryTests(unittest.TestCase):
             mock.init_mock_profile(profile, key, shared)
             (profile / 'config.toml').write_text('[features]\nplugins = false\nremote_plugin = false\n')
             identities = ['019b0000-0000-7000-8000-0000000000b1', '019b0000-0000-7000-8000-0000000000b2']
+            child = '019b0000-0000-7000-8000-0000000000b3'
             for home in (profile, source):
                 folder = home / 'sessions'; folder.mkdir()
                 for identity in identities:
@@ -40,6 +41,18 @@ class GroupReportRecoveryTests(unittest.TestCase):
                         {'timestamp': '2026-01-01T00:00:01.001Z', 'type': 'event_msg', 'payload':
                             {'type': 'user_message', 'message': message, 'images': [], 'local_images': [], 'text_elements': []}}]
                     (folder / f'rollout-2026-01-01T00-00-00-{identity}.jsonl').write_text(
+                        ''.join(json.dumps(row) + '\n' for row in rows))
+                if home == source:
+                    rows = [{'timestamp': '2026-01-01T00:00:00.000Z', 'type': 'session_meta',
+                        'payload': {'id': child, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': '/foreign/missing',
+                                    'originator': 'codex_vscode', 'cli_version': '0.1.0',
+                                    'source': {'subagent': {'other': 'guardian'}}, 'parent_thread_id': identities[0],
+                                    'model_provider': 'openai'}},
+                        {'timestamp': '2026-01-01T00:00:01.000Z', 'type': 'response_item', 'payload':
+                            {'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': 'child answer'}]}},
+                        {'timestamp': '2026-01-01T00:00:01.001Z', 'type': 'event_msg', 'payload':
+                            {'type': 'agent_message', 'message': 'child answer'}}]
+                    (folder / f'rollout-2026-01-01T00-00-00-{child}.jsonl').write_text(
                         ''.join(json.dumps(row) + '\n' for row in rows))
                 migration = subprocess.run([shutil.which('codex'), 'migrate-rollouts', '--apply', '--json'],
                     env={**os.environ, 'CODEX_HOME': str(home)}, capture_output=True, timeout=30)
@@ -62,14 +75,15 @@ class GroupReportRecoveryTests(unittest.TestCase):
                     call(3 + number * 2, 'thread/archive', {'threadId': identity})
             finally:
                 stop_server(server)
-            result = groups.restore(source, profile, shared, backups, key, identities, {},
+            result = groups.restore(source, profile, shared, backups, key, identities, {child: identities[0]},
                 [('/source/Nexus', str(project))], Path(shutil.which('codex')), fallback_root=project)
-            self.assertEqual(result['changed_chats'], 2)
+            self.assertEqual(result['changed_chats'], 3)
             self.assertTrue(result['path_report'].is_file())
             report = json.loads(result['path_report'].read_text())
-            self.assertEqual(set(report['chats']), set(identities))
+            self.assertEqual(set(report['chats']), set(identities) | {child})
             with sqlite3.connect(profile / 'state_5.sqlite') as db:
-                self.assertEqual(dict(db.execute('SELECT id, archived FROM threads')), {identity: 0 for identity in identities})
+                self.assertEqual(dict(db.execute('SELECT id, archived FROM threads')),
+                                 {identity: 0 for identity in [*identities, child]})
             manifest = json.loads((backups / 'latest' / 'manifest.json').read_text())
             archived_files = [name for name in manifest['files'] if name.startswith('archived_sessions/')]
             self.assertEqual(len(archived_files), 2)

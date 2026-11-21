@@ -101,7 +101,7 @@ def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: b
             first_parent = children[sorted(children)[0]]
             mock_child_batch.restore(source, profile, shared, step, key, first_parent, mappings, executable,
                                      children=sorted(children), parents=children, retain_journal=True,
-                                     defer_rollback=True)
+                                     defer_rollback=True, fallback_root=fallback_root, path_reports=reports)
         group._verify_backup(latest, data['backup_manifest_digest'])
         if reports:
             pending_report = step_root / 'path-report.pending.json'
