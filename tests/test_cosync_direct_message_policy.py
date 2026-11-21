@@ -10,6 +10,40 @@ from cosync_direct_restore import DirectReceiver
 
 
 class DirectMessagePolicyTests(unittest.TestCase):
+    def test_receive_does_not_reprepare_an_unchanged_verified_history(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source, titles, graph, profile, backups, project = (root / n for n in
+                ('source', 'titles', 'graph', 'profile', 'backups', 'project'))
+            for p in (source, titles, graph, profile, backups, project): p.mkdir(mode=0o700)
+            (source / 'sessions').mkdir(); (profile / 'sessions').mkdir()
+            identity = '019b0000-0000-7000-8000-000000000001'
+            filename = f'rollout-2026-01-01T00-00-00-{identity}.jsonl'
+            def history(cwd):
+                return json.dumps({'type': 'session_meta', 'ordinal': 0, 'payload': {'id': identity,
+                    'cwd': cwd, 'source': 'vscode', 'history_mode': 'paginated'}}) + '\n'
+            remote, local = source / 'sessions' / filename, profile / 'sessions' / filename
+            remote.write_text(history('/source/Nexus')); local.write_text(history(str(project)))
+            title = json.dumps({'id': identity, 'thread_name': 'name'}) + '\n'
+            (titles / 'session_index.jsonl').write_text(title); (profile / 'session_index.jsonl').write_text(title)
+            (graph / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1', 'edges': [],
+                'omitted_missing': 0, 'omitted_archived': 0}))
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                db.execute('CREATE TABLE threads (id TEXT, rollout_path TEXT, title TEXT, archived INTEGER)')
+                db.execute('INSERT INTO threads VALUES (?,?,?,0)', (identity, str(local), 'name'))
+            with sqlite3.connect(profile / 'thread_history_1.sqlite') as db:
+                db.execute('CREATE TABLE thread_history_projection_state (thread_id TEXT, next_rollout_byte_offset INTEGER, next_rollout_ordinal INTEGER)')
+                db.execute('INSERT INTO thread_history_projection_state VALUES (?,1,1)', (identity,))
+            receiver = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
+                backup_root=backups, key=b'k'*32, mappings=[('/source/Nexus', str(project))], codex=Path(sys.executable),
+                folder_ids=('sessions','titles','graph'), peer_id='vps', prefer_more_messages=True)
+            receiver.verified[identity] = (hashlib.sha256(local.read_bytes()).hexdigest(), 'name')
+            receiver._cache_verified_sources({identity: hashlib.sha256(remote.read_bytes()).hexdigest()})
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True), \
+                 patch('cosync_direct_restore.lineage.prepare_lineage', side_effect=AssertionError('unnecessary preparation')):
+                self.assertEqual(receiver._receive(), 0)
+
     def test_cached_history_requires_unchanged_source_local_and_index(self):
         import hashlib
         with tempfile.TemporaryDirectory() as tmp:
