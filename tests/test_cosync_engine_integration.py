@@ -19,8 +19,8 @@ import cosync_proxy
 import mock_loopback_proxy
 
 
-@unittest.skipUnless(os.environ.get('NEXUS_TEST_SYNCTHING') == '1' and sys.platform == 'linux',
-                     'requires opt-in local Syncthing on Linux')
+@unittest.skipUnless(os.environ.get('NEXUS_TEST_SYNCTHING') == '1' and sys.platform in ('linux', 'darwin'),
+                     'requires opt-in local Syncthing on Linux or macOS')
 class EngineIntegrationTests(unittest.TestCase):
     def test_live_style_sendonly_encrypted_folder_does_not_write_source(self):
         binary = Path(os.environ.get('COSYNC_TEST_ENGINE') or shutil.which('syncthing') or '').resolve()
@@ -145,6 +145,7 @@ class EngineIntegrationTests(unittest.TestCase):
                             os.killpg(process.pid, signal.SIGINT)
                     process.wait(timeout=20)
 
+    @unittest.skipUnless(sys.platform == 'linux', 'test TCP MSS proxy requires Linux')
     def test_modified_gui_can_use_existing_syncthing_without_changing_its_config(self):
         binary = Path(os.environ.get('COSYNC_TEST_ENGINE') or shutil.which('syncthing') or '').resolve()
         with tempfile.TemporaryDirectory(prefix='cosyncx-existing-gui-') as tmp:
@@ -318,6 +319,7 @@ class EngineIntegrationTests(unittest.TestCase):
                             os.killpg(process.pid, signal.SIGINT)
                     process.wait(timeout=20)
 
+    @unittest.skipUnless(sys.platform == 'linux', 'test TCP MSS proxy requires Linux')
     def test_isolated_managed_engine_is_reachable_as_existing_engine(self):
         binary = Path(os.environ.get('COSYNC_TEST_ENGINE') or shutil.which('syncthing') or '').resolve()
         self.assertTrue(binary.is_file())
@@ -500,6 +502,7 @@ class EngineIntegrationTests(unittest.TestCase):
             self.assertEqual(process.returncode, 0)
 
     @unittest.skipUnless(os.environ.get('COSYNC_TEST_APP'), 'requires built portable application')
+    @unittest.skipUnless(sys.platform == 'linux', 'test TCP MSS proxy requires Linux')
     def test_portable_ui_command_connects_to_existing_instance(self):
         app = Path(os.environ['COSYNC_TEST_APP']).resolve()
         binary = Path(os.environ.get('COSYNC_TEST_ENGINE') or shutil.which('syncthing') or '').resolve()

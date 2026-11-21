@@ -290,7 +290,7 @@ class CodexContractTests(unittest.TestCase):
 
     def test_index_preview_checks_archived_chat_in_state_database(self):
         with tempfile.TemporaryDirectory(prefix='nexus-codex-archived-') as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             incoming = root / 'incoming'
             archive = incoming / 'archived_sessions'
             archive.mkdir(parents=True)
@@ -550,7 +550,7 @@ class CodexContractTests(unittest.TestCase):
 
     def test_preview_merge_is_readable_in_disposable_codex(self):
         with tempfile.TemporaryDirectory(prefix='nexus-codex-preview-') as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             local = root / 'local'
             source = root / 'source'
             local_sessions = local / 'sessions' / '2026' / '01' / '01'
@@ -940,7 +940,7 @@ class CodexContractTests(unittest.TestCase):
 
     def test_paginated_synthetic_chat_is_archived_but_not_prepared(self):
         with tempfile.TemporaryDirectory(prefix='nexus-codex-paginated-') as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             source = root / 'source'
             folder = source / 'sessions' / '2026' / '01' / '01'
             folder.mkdir(parents=True)
@@ -1196,7 +1196,7 @@ class CodexContractTests(unittest.TestCase):
                 call(first, 2, 'thread/resume', {'threadId': thread_id, 'cwd': str(project)})
                 self.assertIn(thread_id, call(first, 3, 'thread/loaded/list', {})['data'])
                 self.assertNotIn(thread_id, call(second, 3, 'thread/loaded/list', {})['data'])
-                if sys.platform == 'linux':
+                if sys.platform in ('linux', 'darwin'):
                     import fcntl
                     lock_file = home / 'thread-writer-locks' / (thread_id + '.lock')
                     self.assertTrue(lock_file.is_file())
@@ -1242,7 +1242,7 @@ class CodexContractTests(unittest.TestCase):
                 self.assertIn('active writer', still_busy['error']['message'])
                 stop_server(first)
                 processes.remove(first)
-                if sys.platform == 'linux':
+                if sys.platform in ('linux', 'darwin'):
                     coordination = home / 'thread-writer-locks' / '.coordination.lock'
                     with coordination.open('a+b') as coordinator, lock_file.open('a+b') as stream:
                         fcntl.flock(coordinator.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1339,7 +1339,7 @@ class CodexContractTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform in ('linux', 'darwin'), 'mock watcher requires Linux or macOS')
     def test_mock_watcher_receives_chats_from_windows_and_macos_paths(self):
         with tempfile.TemporaryDirectory(prefix='nexus-multi-chat-contract-') as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             shared, nexus = root / 'shared', root / 'Nexus'
             shared.mkdir()
             (nexus / 'Bot').mkdir(parents=True)
@@ -1520,7 +1520,7 @@ class CodexContractTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform in ('linux', 'darwin'), 'mock writer-lock experiment requires Linux or macOS')
     def test_mock_snapshot_application_waits_for_writer_and_is_resumable(self):
         with tempfile.TemporaryDirectory(prefix='nexus-mock-apply-contract-') as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             shared = root / 'shared'
             shared.mkdir()
             nexus = root / 'Nexus'
@@ -1722,7 +1722,7 @@ class CodexContractTests(unittest.TestCase):
 
     def test_encrypted_snapshot_is_listed_in_a_fresh_disposable_target(self):
         with tempfile.TemporaryDirectory(prefix='nexus-codex-transfer-') as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             source = root / 'source'
             sessions = source / 'sessions' / '2026' / '01' / '01'
             sessions.mkdir(parents=True)
@@ -1837,7 +1837,7 @@ class CodexContractTests(unittest.TestCase):
 
     def test_a_new_rollout_arriving_after_initial_catalogue(self):
         with tempfile.TemporaryDirectory(prefix='nexus-codex-late-') as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             codex = root / 'codex'
             sessions = codex / 'sessions' / '2026' / '01' / '01'
             sessions.mkdir(parents=True)

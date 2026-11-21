@@ -1,12 +1,13 @@
 const vscode = require('vscode');
 const { execFile } = require('child_process');
+const { readRestoreStatus } = require('./restore-status');
 
 // A transfer or a preview is not a restoration. Only a completed, indexed
 // restore may request a reload, and each window handles an event at most once.
 function makeRestoreReloader(vscode, workspaceState) {
     let pending = false;
     return async function maybeReload(event, enabled) {
-        if (!enabled || pending || !workspaceState || !event || event.state !== 'RESTORED'
+        if (!enabled || pending || !workspaceState || !event || event.mock_only !== false || event.state !== 'RESTORED'
                 || event.indexed !== true || !Number.isSafeInteger(event.changed_chats)
                 || event.changed_chats < 1 || typeof event.id !== 'string'
                 || !/^[0-9a-f]{32}$/.test(event.id)) return false;
@@ -38,6 +39,24 @@ function activate(context) {
     let running = false;
     let pending = false;
     let disposed = false;
+    function refreshRestoreStatus(filename, cfg, current) {
+        readRestoreStatus(filename).then(status => {
+            if (disposed || current !== generation) return;
+            if (!status) {
+                item.text = '$(warning) CoSyncX: нет статуса';
+                item.tooltip = 'Не удалось проверить локальный статус восстановления CoSyncX.';
+                return;
+            }
+            const labels = { TRANSFERRING: '$(sync~spin) CoSyncX: передача',
+                RESTORING: '$(sync~spin) CoSyncX: восстановление', PENDING: '$(warning) CoSyncX: ожидание',
+                COMPLETE: '$(check) CoSyncX: восстановлено', ERROR: '$(warning) CoSyncX: ошибка' };
+            item.text = labels[status.state];
+            item.tooltip = 'Локальный статус CoSyncX';
+            if (status.state === 'COMPLETE') {
+                maybeReload(status.restore_event, cfg.get('autoReloadAfterRestore') === true).catch(() => {});
+            }
+        }).catch(() => {});
+    }
     function refresh() {
         if (disposed) return;
         if (running) {
@@ -58,6 +77,11 @@ function activate(context) {
         const mockSyncthingFolder = cfg.get('mockSyncthingFolder');
         const mockSyncthingId = cfg.get('mockSyncthingId');
         const mockSyncthingPort = cfg.get('mockSyncthingPort');
+        const restoreStatusFile = cfg.get('restoreStatusFile');
+        if (restoreStatusFile) {
+            refreshRestoreStatus(restoreStatusFile, cfg, ++generation);
+            return;
+        }
         if (!python || !script || (!configFile && (!shared || !machine))) {
             item.text = '$(sync) Nexus: настройка';
             item.tooltip = 'Укажите путь к программе, папку обмена и ID устройства в настройках Cursor.';
@@ -165,8 +189,13 @@ function activate(context) {
         });
     }
     context.subscriptions.push(item, vscode.commands.registerCommand('nexusSync.refresh', refresh), vscode.workspace.onDidChangeConfiguration(e => { if (e.affectsConfiguration('nexusSync')) refresh(); }));
-    const timer = setInterval(refresh, 60000);
-    context.subscriptions.push({ dispose: () => { disposed = true; generation++; clearInterval(timer); } });
+    const timer = setInterval(() => {
+        if (!vscode.workspace.getConfiguration('nexusSync').get('restoreStatusFile')) refresh();
+    }, 60000);
+    const restoreTimer = setInterval(() => {
+        if (vscode.workspace.getConfiguration('nexusSync').get('restoreStatusFile')) refresh();
+    }, 5000);
+    context.subscriptions.push({ dispose: () => { disposed = true; generation++; clearInterval(timer); clearInterval(restoreTimer); } });
     refresh();
 }
 exports.activate = activate;

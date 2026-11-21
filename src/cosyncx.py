@@ -7,6 +7,8 @@ import cosync_proxy
 import nexus_sync
 import cosync_extensions
 import cosync_lineage
+import cosync_receive_plan
+import cosync_graph_snapshot
 
 
 def main(argv=None) -> int:
@@ -21,6 +23,10 @@ def main(argv=None) -> int:
         return cosync_extensions.main(arguments[1:])
     if arguments and arguments[0] == 'prepare-lineage':
         return cosync_lineage.main(arguments[1:])
+    if arguments and arguments[0] == 'receive-plan':
+        return cosync_receive_plan.main(arguments[1:])
+    if arguments and arguments[0] == 'graph-snapshot':
+        return cosync_graph_snapshot.main(arguments[1:])
     return nexus_sync.main(arguments)
 
 

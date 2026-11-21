@@ -348,7 +348,7 @@ def apply_mock_snapshot(profile: Path, snapshot: Path, shared: Path, key: bytes,
             if not local:
                 if incoming[0]['unsupported'] == 'PAGINATED':
                     _check_mock_ordinals(incoming[0]['path'])
-                _add_mock_chat(profile, incoming[0]['path'].relative_to(mapped), incoming[0]['path'],
+                _add_mock_chat(profile, incoming[0]['path'].relative_to(mapped.resolve(strict=True)), incoming[0]['path'],
                                thread_id, source, key, manifest['authentication'])
                 return {'state': 'ADDED', 'index_updated': False, 'titles_updated': False,
                         'backup_created': False, 'mock_only': True}
@@ -419,9 +419,19 @@ def reindex_mock_profile(profile: Path, shared: Path, key: bytes, target_root: P
             or target_nexus in profile.parents or profile in target_nexus.parents):
         raise ns.SyncError('Моковые папки недоступны')
     catalogue = ns._chat_catalog(profile, include_unsupported=True)
-    if (thread_id not in catalogue or any(len(items) != 1 or items[0]['folder'] != 'sessions'
-            or items[0]['unsupported'] not in (None, 'PAGINATED') for items in catalogue.values())):
+    items = catalogue.get(thread_id, [])
+    if (len(items) != 1 or items[0]['folder'] != 'sessions'
+            or items[0]['unsupported'] not in (None, 'PAGINATED')):
         raise ns.SyncError('Активный моковый чат отсутствует или неоднозначен')
+    if any(len(other) > 1 for other in catalogue.values()):
+        # The old full-profile preview cannot handle paginated lineages. Use
+        # Codex to index this single paginated mock thread independently.
+        if items[0]['unsupported'] != 'PAGINATED' or title_override is not None:
+            raise ns.SyncError('Смешанный моковый индекс пока не поддерживается')
+        import mock_paginated_import
+        mock_paginated_import.index_thread(profile, exchange, key, thread_id, executable)
+        return {'mock_only': True, 'index_updated': True, 'title_verified': False,
+                'contents_verified': False, 'verified_in_cursor': False}
     with _mock_thread_lock(profile, thread_id):
         pass  # A busy writer must be detected before starting the test server.
     marker = profile / 'index-preview.json'
@@ -619,7 +629,8 @@ def sync_latest_mock(profile: Path, shared: Path, key: bytes, peer: str, thread_
 
 
 def sync_all_mock(profile: Path, shared: Path, key: bytes, peer: str, source_root: str,
-                  target_root: Path, executable: Path, *, allow_mock_settings_rebase: bool = False) -> dict:
+                  target_root: Path, executable: Path, *, allow_mock_settings_rebase: bool = False,
+                  accept_local_ahead: bool = False) -> dict:
     """Explicitly receive all supported active chats from one mock snapshot, sequentially."""
     _validate_profile(profile, key)
     exchange = _mock_path(shared)
@@ -663,6 +674,15 @@ def sync_all_mock(profile: Path, shared: Path, key: bytes, peer: str, source_roo
         state = result['state']
         indexes_updated += result.get('index_updated') is True
         counts[state] = counts.get(state, 0) + 1
+        if state == 'LOCAL_AHEAD' and accept_local_ahead:
+            try:
+                checked = reindex_mock_profile(profile, shared, key, target_root, executable, identifier)
+            except (ns.SyncError, OSError, ValueError, TypeError):
+                has_pending_chat = True
+                continue
+            if not checked.get('index_updated'):
+                has_pending_chat = True
+            continue
         if state in ('LOCAL_AHEAD', 'TITLE_CONFLICT'):
             has_pending_chat = True
             continue

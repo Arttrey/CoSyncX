@@ -13,7 +13,8 @@
   ],
   "main": "./extension.js",
   "files": [
-    "extension.js"
+    "extension.js",
+    "restore-status.js"
   ],
   "contributes": {
     "commands": [
@@ -30,6 +31,12 @@
           "default": false,
           "scope": "window",
           "description": "Перезагружать окно после подтверждённого восстановления и индексации чатов."
+        },
+        "nexusSync.restoreStatusFile": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Путь к локальному приватному статусу реального приёмника CoSyncX."
         },
         "nexusSync.python": {
           "type": "string",

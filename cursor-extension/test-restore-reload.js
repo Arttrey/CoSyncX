@@ -15,12 +15,13 @@ Module._load = originalLoad;
 let value;
 const state = { get() { return value; }, async update(_key, next) { value = next; } };
 const reload = makeRestoreReloader(vscode, state);
-const event = { id: 'a'.repeat(32), state: 'RESTORED', indexed: true, changed_chats: 1 };
+const event = { id: 'a'.repeat(32), state: 'RESTORED', indexed: true, changed_chats: 1, mock_only: false };
 (async () => {
     assert.strictEqual(await reload(event, false), false);
     assert.strictEqual(await reload({...event, state: 'SYNCED'}, true), false);
     assert.strictEqual(await reload({...event, indexed: false}, true), false);
     assert.strictEqual(await reload({...event, changed_chats: 0}, true), false);
+    assert.strictEqual(await reload({...event, mock_only: true}, true), false);
     assert.strictEqual(await reload({...event, id: 'untrusted'}, true), false);
     assert.strictEqual(await reload(event, true), true);
     assert.deepStrictEqual(calls, ['workbench.action.reloadWindow']);

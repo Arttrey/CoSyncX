@@ -14,11 +14,27 @@ The experimental restore reload handler and single-generation backup helper are
 not connected to a production receiver. They do not enable automatic import or
 reload of real chats. The mock receiver also supports macOS in isolated tests.
 The experimental automatic change gate likewise does not run a receiver: it
-waits for a connected, settled Syncthing revision and refuses to produce a reload
-event without a separately confirmed successful restore and indexing.
+waits for a connected, settled revision from a configured peer and folder; it
+does not use changes to the local Codex profile as a trigger. The gate refuses
+to produce a reload event without a separately confirmed successful restore
+and indexing. It is experimental, does not poll Syncthing by itself, and must
+not persist a remote sequence alone across Syncthing index resets.
+The direct-folder pipeline is currently limited to disposable mock profiles;
+it does not receive real chats. The optional macOS menu-bar status is read-only
+and reports Syncthing transfer progress, not successful restoration.
+The mock pipeline can test a flattened linear multi-page history and compares
+visible message and inline-image hashes against Codex's index. Flattening is
+experimental: external page references and later updates are not yet proven.
+The mock projection reset touches an undocumented Codex database and refuses
+unknown schemas; it must not be used on a real profile. The Cursor status-file
+and reload handler are prepared but are not connected to a live receiver.
 The experimental `cosyncx prepare-lineage` command rewrites structured project
 paths and dependent byte offsets for a complete paginated thread into a new
 isolated directory. It does not import chats or rebuild the live Codex index.
+`cosyncx receive-plan --incoming PARENT --profile CODEX_HOME --map-root SOURCE TARGET`
+counts candidate conversations, subagent threads and existing archived or active
+IDs without changing the profile. This inventory does not establish that the
+Syncthing transfer is complete or that chats are indexed.
 
 `cosyncx extensions export` can create a separately encrypted bundle of custom
 skills, hooks, rules, plugin files, `AGENTS.md` and `config.toml`. The config can
