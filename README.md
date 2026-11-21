@@ -49,7 +49,9 @@ export local chats, or resolve conflicting versions.
 history to its matching exchange file. The `--replace-initial` flag explicitly
 permits the first replacement; one previous exchange version is kept in a
 private state directory. Subsequent unexpected exchange changes are reported
-as conflicts. This does not export other chats, titles, or relationships.
+as conflicts. `python -m cosync_publish_title` can similarly publish the title
+of one selected chat while preserving other titles. These tools do not export
+other chats or relationships.
 An indexed restore keeps its reload event until the status is published. An
 interrupted indexing pass retains its authenticated metadata so it can finish
 before a newer source revision is processed, provided the local state has not
