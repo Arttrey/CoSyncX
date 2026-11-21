@@ -76,13 +76,18 @@ def _expected_visible_messages(path: Path, *, subagent: bool = False) -> Counter
                     raise ns.SyncError('Unsupported mock assistant content')
                 responses[_text_tag('assistant', ''.join(part['text'] for part in parts))] += 1
             elif row.get('type') == 'event_msg' and kind == 'user_message':
-                if payload.get('local_images') or payload.get('text_elements'):
+                if payload.get('text_elements'):
                     raise ns.SyncError('Unsupported mock user attachments')
                 images = payload.get('images') or []
                 if not isinstance(images, list) or any(not isinstance(image, str) or not image.startswith('data:') for image in images):
                     raise ns.SyncError('Unsupported mock user attachments')
                 for image in images:
                     events[_text_tag('image', image)] += 1
+                local_images = payload.get('local_images') or []
+                if not isinstance(local_images, list) or any(not isinstance(image, str) for image in local_images):
+                    raise ns.SyncError('Unsupported mock user attachments')
+                for image in local_images:
+                    events[_text_tag('local_image', image)] += 1
                 if isinstance(payload.get('message'), str):
                     events[_text_tag('user', payload['message'])] += 1
             elif row.get('type') == 'event_msg' and kind == 'agent_message' and isinstance(payload.get('message'), str):
@@ -105,6 +110,8 @@ def _expected_visible_messages(path: Path, *, subagent: bool = False) -> Counter
                     elif (role == 'user' and part.get('type') == 'image' and isinstance(part.get('image_url'), str)
                           and part['image_url'].startswith('data:')):
                         completed[_text_tag('image', part['image_url'])] += 1
+                    elif role == 'user' and part.get('type') == 'local_image' and isinstance(part.get('path'), str):
+                        completed[_text_tag('local_image', part['path'])] += 1
                     else:
                         raise ns.SyncError('Unsupported mock completed message')
                 completed[_text_tag(role, ''.join(texts))] += 1
@@ -112,21 +119,21 @@ def _expected_visible_messages(path: Path, *, subagent: bool = False) -> Counter
     # in the UI. Completed message items are the visible conversation; older
     # histories without them fall back to response/event records.
     expected = Counter()
-    for role in ('user', 'assistant', 'image'):
+    for role in ('user', 'assistant', 'image', 'local_image'):
         prefix = role + ':'
         completed_role = Counter({key: value for key, value in completed.items() if key.startswith(prefix)})
         response_role = Counter({key: value for key, value in responses.items() if key.startswith(prefix)})
         event_role = Counter({key: value for key, value in events.items() if key.startswith(prefix)})
         has_completed_user = any(key.startswith('user:') for key in completed)
-        if completed_role or (role == 'image' and has_completed_user):
+        if completed_role or (role in ('image', 'local_image') and has_completed_user):
             expected.update(completed_role | event_role)
-        elif not (subagent and role in ('user', 'image')):
+        elif not (subagent and role in ('user', 'image', 'local_image')):
             expected.update(completed_role | event_role | response_role)
     return expected
 
 
 def prepare_flattened_mock(source: Path, destination: Path, thread_id: str,
-                           mappings: list[tuple[str, str]]) -> int:
+                           mappings: list[tuple[str, str]], *, fallback_root: Path | None = None) -> int:
     """Experimentally flatten one linear mock lineage into a new isolated copy.
 
     Original files are untouched. This is not enabled in a real receiver:
@@ -138,7 +145,7 @@ def prepare_flattened_mock(source: Path, destination: Path, thread_id: str,
         raise ns.SyncError('Mock flatten directories overlap')
     with tempfile.TemporaryDirectory(prefix='cosyncx-flat-stage-') as temp:
         prepared = Path(temp).resolve() / 'prepared'
-        lineage.prepare_lineage(source, prepared, thread_id, mappings)
+        lineage.prepare_lineage(source, prepared, thread_id, mappings, fallback_root=fallback_root)
         items = ns._chat_catalog(prepared, include_unsupported=True)[thread_id]
         pages = {lineage._page_id(item['path'], thread_id): item for item in items}
         parents = {page: str(item['history_base']['thread_id']) for page, item in pages.items()
@@ -204,6 +211,9 @@ def prepare_flattened_mock(source: Path, destination: Path, thread_id: str,
             destination.mkdir(mode=0o700)
             for child in staged.iterdir():
                 os.replace(child, destination / child.name)
+            report = prepared / 'cosyncx-path-report.json'
+            if report.is_file() and not report.is_symlink():
+                os.replace(report, destination / report.name)
         return count
 
 
@@ -543,24 +553,27 @@ def index_thread(profile: Path, shared: Path, key: bytes, thread_id: str,
                                 'capabilities': {'experimentalApi': True}})
         process.stdin.write(b'{"method":"initialized","params":{}}\n')
         process.stdin.flush()
-        call(2, 'thread/resume', {'threadId': thread_id, 'path': str(leaf['path']), 'cwd': leaf['cwd']})
+        call(2, 'thread/resume', {'threadId': thread_id, 'path': str(leaf['path']),
+                                  'cwd': leaf['cwd'], 'excludeTurns': True})
         number = 3
         if title is not None:
             call(number, 'thread/name/set', {'threadId': thread_id, 'name': title})
             number += 1
         cursor, seen, actual_messages = None, set(), Counter()
         while True:
-            params = {'threadId': thread_id, 'itemsView': 'full', 'limit': 10}
+            # Listing individual items keeps image-heavy conversations from
+            # returning the entire history or many large turns in one response.
+            params = {'threadId': thread_id, 'limit': 1 if leaf['path'].stat().st_size > ns.MAX_CHAT_BYTES else 10}
             if cursor is not None:
                 params['cursor'] = cursor
-            result = call(number, 'thread/turns/list', params)
+            result = call(number, 'thread/items/list', params)
             number += 1
             if not isinstance(result, dict) or not isinstance(result.get('data'), list) or 'nextCursor' not in result:
                 raise ns.SyncError('Invalid mock turns result')
-            for turn in result['data']:
-                if not isinstance(turn, dict) or not isinstance(turn.get('items'), list):
+            for entry in result['data']:
+                if not isinstance(entry, dict) or not isinstance(entry.get('item'), dict):
                     raise ns.SyncError('Invalid mock turn items')
-                for item in turn['items']:
+                for item in (entry['item'],):
                     if not isinstance(item, dict):
                         continue
                     if item.get('type') == 'agentMessage':
@@ -582,13 +595,15 @@ def index_thread(profile: Path, shared: Path, key: bytes, thread_id: str,
                         elif (part.get('type') == 'image' and isinstance(part.get('url'), str)
                               and part['url'].startswith('data:')):
                             actual_messages[_text_tag('image', part['url'])] += 1
+                        elif part.get('type') == 'localImage' and isinstance(part.get('path'), str):
+                            actual_messages[_text_tag('local_image', part['path'])] += 1
                         else:
                             raise ns.SyncError('Unsupported indexed mock user content')
                     actual_messages[_text_tag('user', ''.join(texts))] += 1
             cursor = result['nextCursor']
             if cursor is None:
                 break
-            if not isinstance(cursor, str) or not cursor or cursor in seen or len(seen) >= 1000:
+            if not isinstance(cursor, str) or not cursor or cursor in seen or len(seen) >= 100000:
                 raise ns.SyncError('Invalid mock turns cursor')
             seen.add(cursor)
         if expected_messages - actual_messages:
@@ -612,6 +627,8 @@ def index_thread(profile: Path, shared: Path, key: bytes, thread_id: str,
                 if isinstance(item, dict) and item.get('id') == thread_id:
                     if title is not None and item.get('name') != title:
                         raise ns.SyncError('Mock title was not indexed')
+                    if item.get('cwd') != leaf['cwd']:
+                        raise ns.SyncError('Mock workspace was not indexed')
                     verified = True
                     return
             cursor = result['nextCursor']

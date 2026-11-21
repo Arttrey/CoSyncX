@@ -101,10 +101,26 @@ class ArchivedRestoreContractTests(unittest.TestCase):
             self.assertTrue(set(impact['files']) <= set(manifest))
             self.assertIn('state_5.sqlite', manifest)
             self.assertIn('thread_history_1.sqlite', manifest)
+            wal = profile / 'thread_history_1.sqlite-wal'
+            with sqlite3.connect(profile / 'thread_history_1.sqlite') as db:
+                self.assertEqual(db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0], 0)
+            if wal.exists():
+                self.assertEqual(wal.stat().st_size, 0)
+            original_replace = cosync_restore_backup.replace_latest
+            def empty_wal_replace(*args, **kwargs):
+                verify = kwargs['pre_commit']
+                def create_empty_wal(stage, saved):
+                    wal.touch(exist_ok=True)
+                    verify(stage, saved)
+                kwargs['pre_commit'] = create_empty_wal
+                return original_replace(*args, **kwargs)
+            with patch.object(mock_archive_backup.backup, 'replace_latest', side_effect=empty_wal_replace):
+                mock_archive_backup.prepare(profile, shared, backups, key, [parent])
+            if wal.exists() and wal.stat().st_size == 0:
+                wal.unlink()
             history = profile / impact['files'][0]
             original = history.read_bytes()
             previous = (backups / 'latest' / impact['files'][0]).read_bytes()
-            original_replace = cosync_restore_backup.replace_latest
             def changing_replace(*args, **kwargs):
                 verify = kwargs['pre_commit']
                 def change_then_verify(stage, saved):
@@ -228,6 +244,30 @@ class ArchivedRestoreContractTests(unittest.TestCase):
             selection = [archived[0].relative_to(profile).as_posix(), duplicate_name]
             selection += [path.name for path in profile.glob('state_*.sqlite')]
             selection += [path.name for path in profile.glob('thread_history_*.sqlite')]
+            absent = '019b0000-0000-7000-8000-000000000003'
+            group = mock_archive_backup.prepare(profile, shared, backups, key, [thread],
+                                                extra_threads=[other, absent])
+            manifest = json.loads((backups / 'latest' / 'manifest.json').read_text())['files']
+            self.assertIn(other_path.relative_to(profile).as_posix(), manifest)
+            self.assertEqual(group['extra_threads'], 2)
+            self.assertEqual(group['absent_extra_threads'], 1)
+            new_path = local_folder / f'rollout-2026-01-01T00-00-00-{absent}.jsonl'
+            original_replace = cosync_restore_backup.replace_latest
+            def add_new_thread(*args, **kwargs):
+                verify = kwargs['pre_commit']
+                def create_then_verify(stage, saved):
+                    extra_rows = [json.loads(line) for line in other_path.read_text().splitlines()]
+                    extra_rows[0]['payload']['id'] = absent
+                    new_path.write_text(''.join(json.dumps(row) + '\n' for row in extra_rows))
+                    verify(stage, saved)
+                kwargs['pre_commit'] = create_then_verify
+                return original_replace(*args, **kwargs)
+            with patch.object(mock_archive_backup.backup, 'replace_latest', side_effect=add_new_thread):
+                with self.assertRaises(nexus_sync.SyncError):
+                    mock_archive_backup.prepare(profile, shared, backups, key, [thread],
+                                                extra_threads=[other, absent])
+            self.assertEqual(json.loads((backups / 'latest' / 'manifest.json').read_text())['files'], manifest)
+            new_path.unlink()
             with sqlite3.connect(profile / 'thread_history_1.sqlite') as db:
                 before_other = db.execute('SELECT count(*) FROM thread_items WHERE thread_id = ?', (other,)).fetchone()[0]
             self.assertGreater(before_other, 0)
@@ -343,6 +383,76 @@ class ArchivedRestoreContractTests(unittest.TestCase):
                 self.assertEqual(db.execute('SELECT archived FROM threads WHERE id=?', (thread,)).fetchone(), (1,))
             with sqlite3.connect(profile / 'thread_history_1.sqlite') as db:
                 self.assertEqual(db.execute('SELECT count(*) FROM thread_items WHERE thread_id=?', (other,)).fetchone()[0], before_other)
+            source_path = remote_folder / name
+            rows = [json.loads(line) for line in source_path.read_text().splitlines()]
+            self.assertGreaterEqual(len(rows), 3)
+            prefix, suffix = rows[:2], rows[2:]
+            source_path.write_text(''.join(json.dumps(row) + '\n' for row in prefix))
+            new_header = dict(prefix[0])
+            new_header['ordinal'] = prefix[-1]['ordinal'] + 1
+            new_header['payload'] = dict(prefix[0]['payload'], history_base={
+                'thread_id': thread, 'end_byte_offset': source_path.stat().st_size,
+                'end_ordinal_exclusive': new_header['ordinal']})
+            for row in suffix:
+                row['ordinal'] += 1
+            page = '019b0000-0000-7000-8000-000000000099'
+            page_path = remote_folder / (name[:-6] + '_' + page + '.jsonl')
+            page_path.write_text(''.join(json.dumps(row) + '\n' for row in [new_header, *suffix]))
+            with self.assertRaises(nexus_sync.SyncError):
+                mock_archive_restore.restore(*arguments)
+            self.assertFalse((backups / 'mock-archive-pending.json').exists())
+            original_page = page_path.read_bytes()
+            with page_path.open('a', encoding='utf-8') as out:
+                out.write(json.dumps({'type': 'turn_context', 'ordinal': suffix[-1]['ordinal'] + 1,
+                                      'payload': {'cwd': '/missing/previous/workspace'}}) + '\n')
+            report_stage = root / 'report-stage'
+            mock_archive_restore.pages.prepare_flattened_mock(source, report_stage, thread,
+                [('/source/Nexus', str(project))], fallback_root=project)
+            report = json.loads((report_stage / 'cosyncx-path-report.json').read_text())
+            self.assertIn('/missing/previous/workspace', report['unmapped_working_directories'])
+            page_path.write_bytes(original_page)
+            page_rows = [json.loads(line) for line in page_path.read_text().splitlines()]
+            page_rows[0]['payload']['cwd'] = '/missing/previous/workspace'
+            page_path.write_text(''.join(json.dumps(row) + '\n' for row in page_rows))
+            if os.name != 'nt':
+                backups.chmod(0o755)
+                with self.assertRaises(nexus_sync.SyncError):
+                    mock_archive_restore.restore(*arguments, flatten_multi=True, fallback_root=project)
+                self.assertFalse(journal.exists())
+            backups.chmod(0o700)
+            result = mock_archive_restore.restore(*arguments, flatten_multi=True, fallback_root=project)
+            self.assertTrue(result['path_report'].is_file())
+            self.assertEqual(result['path_report'].stat().st_mode & 0o777, 0o600)
+            report = json.loads(result['path_report'].read_text())
+            self.assertIn('/missing/previous/workspace', report['unmapped_working_directories'])
+            self.assertEqual(report['fallback_workspace'], str(project))
+            self.assertEqual(report['authentication'], nexus_sync._manifest_tag(report, key))
+            server = start()
+            try:
+                data = call(server, 2, 'thread/turns/list', {'threadId': thread, 'itemsView': 'full', 'limit': 10})
+                self.assertIn('synthetic remote version', json.dumps(data))
+            finally:
+                stop_server(server)
+            server = start()
+            try:
+                call(server, 2, 'thread/archive', {'threadId': thread})
+            finally:
+                stop_server(server)
+            previous_reports = set(backups.glob('mock-path-report-*.json'))
+            original_unlink = Path.unlink
+            failed = [False]
+            def interrupt_journal(path, *args, **kwargs):
+                if path == journal and not failed[0]:
+                    failed[0] = True
+                    raise OSError('synthetic interruption after report creation')
+                return original_unlink(path, *args, **kwargs)
+            with patch.object(Path, 'unlink', interrupt_journal):
+                with self.assertRaises(OSError):
+                    mock_archive_restore.restore(*arguments, flatten_multi=True, fallback_root=project)
+            self.assertFalse(journal.exists())
+            self.assertEqual(set(backups.glob('mock-path-report-*.json')), previous_reports)
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                self.assertEqual(db.execute('SELECT archived FROM threads WHERE id=?', (thread,)).fetchone(), (1,))
 
 
 if __name__ == '__main__': unittest.main()

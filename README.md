@@ -40,6 +40,11 @@ authenticated journal and blocks further backup rotation for review.
 The experimental `cosyncx prepare-lineage` command rewrites structured project
 paths and dependent byte offsets for a complete paginated thread into a new
 isolated directory. It does not import chats or rebuild the live Codex index.
+An explicit `--missing-cwd-fallback` inside the configured local root lets that
+preparation preserve unavailable historical working directories and write a
+private path report. The mock archive importer retains an authenticated local
+report for missing working directories and local image references and returns
+its path; showing it in Cursor is not implemented yet.
 `cosyncx receive-plan --incoming PARENT --profile CODEX_HOME --map-root SOURCE TARGET`
 counts candidate conversations, subagent threads and existing archived or active
 IDs without changing the profile. This inventory does not establish that the

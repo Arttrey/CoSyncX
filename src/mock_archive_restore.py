@@ -1,15 +1,17 @@
 """One-page archived-chat experiment, restricted to disposable mock profiles.
 
 An interruption leaves a journal and requires review. This is not a live
-receiver and deliberately refuses multi-page sources and incoming descendants.
+receiver; multi-page flattening is an explicit, isolated experiment.
 """
 import json
 import hmac
+import hashlib
 import os
 from pathlib import Path
 import queue
 import re
 import sqlite3
+import stat
 import shutil
 import subprocess
 import tempfile
@@ -35,7 +37,8 @@ def _db_signatures(profile: Path, names: set[str]) -> dict:
                 raise ns.SyncError('Mock database is a link')
             if path.exists():
                 info = path.stat()
-                result[path.name] = [info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+                result[path.name] = (None if path.name.endswith('-wal') and info.st_size == 0
+                                     else [info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns])
             else:
                 result[path.name] = None
     return result
@@ -52,6 +55,24 @@ def _stable_digest(path: Path) -> str:
             or ns._digest(path) != digest):
         raise ns.SyncError('Mock verified file changed')
     return digest
+
+
+def _replace_journal(journal: Path, data: dict, key: bytes) -> None:
+    data['authentication'] = ns._manifest_tag(data, key)
+    fd, name = tempfile.mkstemp(prefix='.mock-archive-journal-', dir=journal.parent)
+    temporary = Path(name)
+    try:
+        if hasattr(os, 'fchmod'):
+            os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as out:
+            json.dump(data, out, sort_keys=True)
+            out.flush()
+            os.fsync(out.fileno())
+        if journal.is_symlink() or not journal.is_file():
+            raise ns.SyncError('Mock archive journal unavailable')
+        os.replace(temporary, journal)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _change_archive(profile: Path, executable: Path, thread: str, method: str) -> None:
@@ -120,7 +141,8 @@ def _archive(profile: Path, executable: Path, thread: str) -> None:
 
 
 def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: bytes,
-            thread: str, mappings: list[tuple[str, str]], executable: Path, *, title: str | None = None) -> None:
+            thread: str, mappings: list[tuple[str, str]], executable: Path, *, title: str | None = None,
+            flatten_multi: bool = False, fallback_root: Path | None = None) -> None:
     source = mock._mock_path(source)
     profile = mock._validate_profile(profile, key)
     shared, backup_root = mock._mock_path(shared), mock._mock_path(backup_root)
@@ -147,7 +169,36 @@ def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: b
         raise ns.SyncError('Mock archived versions are ambiguous')
     with tempfile.TemporaryDirectory(prefix='cosyncx-archive-prepare-') as tmp:
         prepared = Path(tmp).resolve() / 'prepared'
-        lineage.prepare_lineage(source, prepared, thread, mappings)
+        source_pages = source_catalog.get(thread, [])
+        if len(source_pages) > 1:
+            if flatten_multi is not True:
+                raise ns.SyncError('Mock multi-page archive needs explicit experimental flattening')
+            page_ids = {lineage._page_id(item['path'], thread) for item in source_pages}
+            for identity, items in source_catalog.items():
+                if identity == thread:
+                    continue
+                if any(isinstance(item.get('history_base'), dict)
+                       and item['history_base'].get('thread_id') in page_ids for item in items):
+                    raise ns.SyncError('Mock external page references prevent flattening')
+            pages.prepare_flattened_mock(source, prepared, thread, mappings, fallback_root=fallback_root)
+        else:
+            lineage.prepare_lineage(source, prepared, thread, mappings, fallback_root=fallback_root)
+        report_path = prepared / 'cosyncx-path-report.json'
+        report = None
+        if report_path.exists():
+            info = backup_root.stat()
+            if (report_path.is_symlink() or not report_path.is_file() or report_path.stat().st_size > 4 * 1024 * 1024
+                    or (os.name != 'nt' and (info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077))):
+                raise ns.SyncError('Mock missing-path report directory is not private')
+            report = json.loads(report_path.read_bytes())
+            if (not isinstance(report, dict) or report.get('version') != 1
+                    or type(report.get('fallback_used')) is not bool
+                    or not isinstance(report.get('unmapped_working_directories'), list)
+                    or not isinstance(report.get('unavailable_local_files'), list)
+                    or not (report['unmapped_working_directories'] or report['unavailable_local_files'])
+                    or any(not isinstance(value, str) for value in
+                           report['unmapped_working_directories'] + report['unavailable_local_files'])):
+                raise ns.SyncError('Invalid mock missing-path report')
         incoming = ns._chat_catalog(prepared, include_unsupported=True).get(thread, [])
         if len(incoming) != 1 or incoming[0]['folder'] != 'sessions':
             raise ns.SyncError('Mock archive requires one incoming page')
@@ -169,22 +220,30 @@ def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: b
             after = cosync_archive_plan.archive_impact(profile, [thread])
             if after['threads'] != impact['threads'] or not descendants <= after['archived_ids']:
                 raise ns.SyncError('Mock descendants did not return to archive')
-            current = ns._chat_catalog(profile, include_unsupported=True).get(thread, [])
-            active = [item for item in current if item['folder'] == 'sessions']
-            remaining = [item for item in current if item['folder'] == 'archived_sessions']
-            if len(active) != 1 or len(active) + len(remaining) != len(current):
-                raise ns.SyncError('Mock unarchive produced an unexpected state')
             manifest_path = backup_root / 'latest' / 'manifest.json'
             if _stable_digest(manifest_path) != data['backup_manifest_digest']:
                 raise ns.SyncError('Mock backup changed after preparation')
             manifest = json.loads(manifest_path.read_bytes())['files']
-            for item in remaining:
+            known = {}
+            for item in local:
                 name = item['path'].relative_to(profile).as_posix()
-                if name not in impact['files'] or ns._digest(item['path']) != manifest.get(name):
+                if name not in manifest:
+                    raise ns.SyncError('Mock archived version is absent from backup')
+                known.setdefault(item['path'].name, set()).add(manifest[name])
+            current = ns._chat_catalog(profile, include_unsupported=True).get(thread, [])
+            active = [item for item in current if item['folder'] == 'sessions']
+            remaining = [item for item in current if item['folder'] == 'archived_sessions']
+            canonical = [item for item in active if lineage._page_id(item['path'], thread) == thread]
+            if len(canonical) != 1 or len(active) + len(remaining) != len(current):
+                raise ns.SyncError('Mock unarchive produced an unexpected state')
+            for item in current:
+                if ns._digest(item['path']) not in known.get(item['path'].name, set()):
                     raise ns.SyncError('Mock archived version changed after backup')
-            for item in remaining:
+            for item in current:
+                if item['path'] == canonical[0]['path']:
+                    continue
                 item['path'].unlink()
-            target = active[0]['path']
+            target = canonical[0]['path']
             temporary = target.with_name('.cosyncx-archive-' + os.urandom(12).hex())
             try:
                 ns._copy_stable_chat(incoming[0]['path'], temporary)
@@ -207,24 +266,24 @@ def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: b
                              'verified_title_existed': title_path.is_file(),
                              'verified_title_digest': _stable_digest(title_path) if title_path.is_file() else None,
                              'verified_db_signatures': _db_signatures(profile, db_names)})
-                data['authentication'] = ns._manifest_tag(data, key)
-                fd, name = tempfile.mkstemp(prefix='.mock-archive-journal-', dir=backup_root)
-                temporary_journal = Path(name)
-                try:
-                    if hasattr(os, 'fchmod'):
-                        os.fchmod(fd, 0o600)
-                    with os.fdopen(fd, 'w', encoding='utf-8') as out:
-                        json.dump(data, out, sort_keys=True)
-                        out.flush()
-                        os.fsync(out.fileno())
-                    if journal.is_symlink() or not journal.is_file():
-                        raise ns.SyncError('Mock archive journal unavailable')
-                    os.replace(temporary_journal, journal)
-                finally:
-                    temporary_journal.unlink(missing_ok=True)
+                _replace_journal(journal, data, key)
             pages.index_thread(profile, shared, key, thread, executable, title=title,
                                allow_title_change=True, on_verified=mark_verified)
+            output_report = None
+            if report is not None:
+                output_report = backup_root / ('mock-path-report-' + os.urandom(16).hex() + '.json')
+                payload = {'format': 'cosyncx-mock-path-report-v1', 'thread': thread, **report}
+                payload['authentication'] = ns._manifest_tag(payload, key)
+                content = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode('utf-8')
+                data.update({'report_name': output_report.name, 'report_digest': hashlib.sha256(content).hexdigest()})
+                _replace_journal(journal, data, key)
+                fd = os.open(output_report, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+                with os.fdopen(fd, 'wb') as out:
+                    out.write(content)
+                    out.flush()
+                    os.fsync(out.fileno())
             journal.unlink()
+            return {'mock_only': True, 'path_report': output_report}
         except Exception as exc:
             # A subprocess timeout may mean our own Codex process still uses
             # the mock profile; do not attempt rollback until it is stopped.
@@ -274,6 +333,17 @@ def rollback(profile: Path, shared: Path, backup_root: Path, key: bytes) -> None
         raise ns.SyncError('Mock archive journal is not authenticated')
     if _stable_digest(manifest_path) != data['backup_manifest_digest']:
         raise ns.SyncError('Mock archive backup manifest changed')
+    report_file = None
+    if 'report_name' in data or 'report_digest' in data:
+        if (not isinstance(data.get('report_name'), str)
+                or re.fullmatch(r'mock-path-report-[0-9a-f]{32}\.json', data['report_name']) is None
+                or not isinstance(data.get('report_digest'), str)
+                or re.fullmatch(r'[0-9a-f]{64}', data['report_digest']) is None):
+            raise ns.SyncError('Invalid mock path report journal')
+        report_file = backup_root / data['report_name']
+        if report_file.is_symlink() or (report_file.exists() and
+                (not report_file.is_file() or _stable_digest(report_file) != data['report_digest'])):
+            raise ns.SyncError('Mock path report changed after interruption')
     verified_keys = {'verified_digest', 'verified_title_existed', 'verified_title_digest', 'verified_db_signatures'}
     has_verified = bool(verified_keys & set(data))
     if has_verified and (not verified_keys <= set(data)
@@ -386,4 +456,6 @@ def rollback(profile: Path, shared: Path, backup_root: Path, key: bytes) -> None
                     source_db.backup(destination_db)
                     if destination_db.execute('PRAGMA quick_check').fetchone() != ('ok',):
                         raise ns.SyncError('Recovered mock database is invalid')
+        if report_file is not None and report_file.is_file():
+            report_file.unlink()
         journal.unlink()

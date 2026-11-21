@@ -42,6 +42,19 @@ class MockPaginatedImportTests(unittest.TestCase):
         child = dict(meta, history_base={'thread_id': self.thread, 'end_byte_offset': self.first.stat().st_size, 'end_ordinal_exclusive': 2})
         self.last.write_text(json.dumps({'timestamp': '2026-01-01T00:00:02.000Z', 'type': 'session_meta', 'payload': child, 'ordinal': 2}) + '\n')
 
+    def test_expected_messages_keep_local_image_reference(self):
+        path = '/missing/old-image.png'
+        rows = [
+            {'type': 'event_msg', 'payload': {'type': 'user_message', 'message': 'synthetic',
+                'images': [], 'local_images': [path], 'text_elements': []}},
+            {'type': 'event_msg', 'payload': {'type': 'item_completed', 'item': {'type': 'UserMessage',
+                'content': [{'type': 'text', 'text': 'synthetic'}, {'type': 'local_image', 'path': path}]}}}]
+        file = self.root / 'synthetic-history.jsonl'
+        file.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        expected = importer._expected_visible_messages(file)
+        self.assertEqual(expected[importer._text_tag('local_image', path)], 1)
+        self.assertEqual(expected[importer._text_tag('user', 'synthetic')], 1)
+
     def test_adds_pages_and_refuses_existing_thread(self):
         self.assertEqual(importer.add_thread(self.source, self.profile, self.shared, self.key, self.thread,
                                              [('/source/Nexus', str(self.project))]), 2)
@@ -240,6 +253,33 @@ class MockPaginatedImportTests(unittest.TestCase):
             self.assertIn('synthetic child answer', json.dumps(result))
         finally:
             stop_server(server)
+
+    @unittest.skipUnless(os.environ.get('NEXUS_TEST_CODEX') == '1' and shutil.which('codex'), 'requires disposable Codex')
+    def test_explicit_workspace_fallback_is_indexed_and_report_retained(self):
+        self.last.unlink()
+        rows = [{'timestamp': '2026-01-01T00:00:00.000Z', 'type': 'session_meta', 'payload':
+                 {'id': self.thread, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': '/missing/old/workspace',
+                  'originator': 'codex_vscode', 'cli_version': '0.1.0', 'source': 'vscode', 'model_provider': 'openai'}},
+                {'timestamp': '2026-01-01T00:00:01.000Z', 'type': 'response_item', 'payload':
+                 {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'synthetic message'}]}},
+                {'timestamp': '2026-01-01T00:00:01.001Z', 'type': 'event_msg', 'payload':
+                 {'type': 'user_message', 'message': 'synthetic message', 'images': [], 'local_images': [], 'text_elements': []}}]
+        self.first.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        migration = subprocess.run([shutil.which('codex'), 'migrate-rollouts', '--apply', '--json'],
+            env={**os.environ, 'CODEX_HOME': str(self.source)}, capture_output=True, text=True, timeout=30)
+        self.assertEqual(migration.returncode, 0, migration.stderr)
+        staged = self.root / 'fallback-staged'
+        importer.prepare_flattened_mock(self.source, staged, self.thread,
+            [('/source/Nexus', str(self.project))], fallback_root=self.project)
+        report = json.loads((staged / 'cosyncx-path-report.json').read_text())
+        self.assertTrue(report['fallback_used'])
+        self.assertIn('/missing/old/workspace', report['unmapped_working_directories'])
+        source_file = next((staged / 'sessions').rglob('*.jsonl'))
+        target = self.profile / source_file.relative_to(staged)
+        target.parent.mkdir(parents=True)
+        shutil.copyfile(source_file, target)
+        # index_thread independently requires Codex to return the chosen cwd.
+        importer.index_thread(self.profile, self.shared, self.key, self.thread, Path(shutil.which('codex')))
 
     @unittest.skipUnless(os.environ.get('NEXUS_TEST_CODEX') == '1' and shutil.which('codex'), 'requires disposable Codex')
     def test_direct_receiver_defers_unverified_multi_page_thread(self):

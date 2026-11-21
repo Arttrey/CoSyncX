@@ -53,7 +53,7 @@ def _map_cwd(cwd: str, mappings: list[tuple[str, str]]) -> str:
 
 
 def prepare_lineage(incoming: Path, destination: Path, thread_id: str,
-                    mappings: list[tuple[str, str]]) -> int:
+                    mappings: list[tuple[str, str]], *, fallback_root: Path | None = None) -> int:
     """Rewrite structured cwd fields and inherited byte offsets in a new copy.
 
     This is an experiment for isolated profiles only; it never updates the
@@ -69,6 +69,17 @@ def prepare_lineage(incoming: Path, destination: Path, thread_id: str,
         raise ns.SyncError('Destination must be a new isolated directory')
     if not mappings:
         raise ns.SyncError('No path mappings')
+    fallback = None
+    if fallback_root is not None:
+        if not fallback_root.is_absolute():
+            raise ns.SyncError('Fallback workspace must be absolute')
+        try:
+            fallback = fallback_root.resolve(strict=True)
+            roots = [Path(target).resolve(strict=True) for _, target in mappings]
+        except (OSError, RuntimeError) as exc:
+            raise ns.SyncError('Fallback workspace is unavailable') from exc
+        if not fallback.is_dir() or not any(fallback == root or root in fallback.parents for root in roots):
+            raise ns.SyncError('Fallback workspace must be inside a configured local root')
     catalog = ns._chat_catalog(incoming, include_unsupported=True)
     entries = catalog.get(thread, [])
     if not entries or ns._paged_lineage(entries, thread) != 'PRESENT_UNVERIFIED':
@@ -78,6 +89,10 @@ def prepare_lineage(incoming: Path, destination: Path, thread_id: str,
     pages = {_page_id(x['path'], thread): x for x in entries}
     dependencies = {page: str(uuid.UUID(item['history_base']['thread_id']))
                     for page, item in pages.items() if item.get('history_base') is not None}
+    leaves = set(pages) - set(dependencies.values())
+    unmapped = set()
+    unavailable_files = set()
+    fallback_used = False
     boundaries = {page: set() for page in pages}
     for page, source in dependencies.items():
         boundaries[source].add(pages[page]['history_base']['end_byte_offset'])
@@ -106,12 +121,44 @@ def prepare_lineage(incoming: Path, destination: Path, thread_id: str,
                         if not isinstance(record, dict): raise ns.SyncError('Invalid paginated record')
                         payload = record.get('payload')
                         changed = False
+                        if record.get('type') == 'event_msg' and isinstance(payload, dict):
+                            paths = []
+                            if payload.get('type') == 'user_message' and isinstance(payload.get('local_images'), list):
+                                paths.extend(value for value in payload['local_images'] if isinstance(value, str))
+                            item = payload.get('item') if payload.get('type') == 'item_completed' else None
+                            if isinstance(item, dict) and item.get('type') == 'UserMessage' and isinstance(item.get('content'), list):
+                                paths.extend(part['path'] for part in item['content'] if isinstance(part, dict)
+                                             and part.get('type') == 'local_image' and isinstance(part.get('path'), str))
+                            for value in paths:
+                                try:
+                                    path = Path(value)
+                                    if not path.is_absolute() or not path.is_file():
+                                        unavailable_files.add(value)
+                                except (OSError, ValueError):
+                                    unavailable_files.add(value)
+                            if len(unavailable_files) > 10000:
+                                raise ns.SyncError('Too many unavailable local files')
                         if record.get('type') in ('session_meta', 'turn_context') and isinstance(payload, dict):
                             cwd = payload.get('cwd')
                             if cwd is not None:
                                 if not isinstance(cwd, str): raise ns.SyncError('Invalid working directory')
-                                payload['cwd'] = _map_cwd(cwd, mappings)
-                                changed = True
+                                try:
+                                    payload['cwd'] = _map_cwd(cwd, mappings)
+                                    changed = True
+                                except ns.SyncError:
+                                    if fallback is None:
+                                        raise
+                                    # Keep historical contexts intact. Only a
+                                    # leaf session gets the explicit workspace
+                                    # fallback needed to open it locally.
+                                    ns.map_path(cwd, cwd, cwd)
+                                    unmapped.add(cwd)
+                                    if len(unmapped) > 10000:
+                                        raise ns.SyncError('Too many unmapped working directories')
+                                    if record.get('type') == 'session_meta' and page in leaves:
+                                        payload['cwd'] = str(fallback)
+                                        fallback_used = True
+                                        changed = True
                             if record.get('type') == 'session_meta' and page in dependencies:
                                 base = payload.get('history_base')
                                 old_offset = base.get('end_byte_offset') if isinstance(base, dict) else None
@@ -134,6 +181,14 @@ def prepare_lineage(incoming: Path, destination: Path, thread_id: str,
         staged = ns._chat_catalog(stage, include_unsupported=True).get(thread, [])
         if len(staged) != len(entries) or ns._paged_lineage(staged, thread) != 'PRESENT_UNVERIFIED':
             raise ns.SyncError('Rewritten lineage did not validate')
+        if unmapped or unavailable_files:
+            report = stage / 'cosyncx-path-report.json'
+            fd = os.open(report, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as out:
+                json.dump({'version': 1, 'unmapped_working_directories': sorted(unmapped),
+                           'unavailable_local_files': sorted(unavailable_files),
+                           'fallback_used': fallback_used,
+                           'fallback_workspace': str(fallback) if fallback_used else None}, out, ensure_ascii=False)
         destination.mkdir(mode=0o700)
         for child in stage.iterdir(): os.replace(child, destination / child.name)
     return len(entries)
@@ -145,10 +200,15 @@ def main(argv=None) -> int:
     parser.add_argument('--destination', type=Path, required=True)
     parser.add_argument('--thread-id', required=True)
     parser.add_argument('--map-root', nargs=2, action='append', required=True, metavar=('SOURCE', 'TARGET'))
+    parser.add_argument('--missing-cwd-fallback', type=Path,
+                        help='Explicit local workspace for an unavailable current cwd; preserve historical paths')
     args = parser.parse_args(argv)
     try:
-        pages = prepare_lineage(args.incoming, args.destination, args.thread_id, args.map_root)
-        print(json.dumps({'pages': pages, 'applied': False, 'index_verified': False}))
+        pages = prepare_lineage(args.incoming, args.destination, args.thread_id, args.map_root,
+                                fallback_root=args.missing_cwd_fallback)
+        report = args.destination / 'cosyncx-path-report.json'
+        print(json.dumps({'pages': pages, 'unmapped_paths_reported': report.is_file(),
+                          'applied': False, 'index_verified': False}))
         return 0
     except (ns.SyncError, OSError, ValueError) as exc:
         print('CoSyncX lineage:', str(exc), file=sys.stderr)

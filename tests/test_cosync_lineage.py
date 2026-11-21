@@ -88,5 +88,31 @@ class LineageTests(unittest.TestCase):
             rows = [json.loads(line) for line in inp]
         self.assertEqual(rows[-1]['payload']['text'], large['payload']['text'])
 
+    def test_explicit_fallback_preserves_historical_cwd_and_reports_missing_paths(self):
+        root_page = self._write(cwd='/missing/source/project')
+        with root_page.open('a', encoding='utf-8') as out:
+            out.write(json.dumps({'type': 'turn_context', 'ordinal': 2,
+                                  'payload': {'cwd': '/missing/other/project'}}) + '\n')
+            out.write(json.dumps({'type': 'event_msg', 'ordinal': 3, 'payload': {'type': 'item_completed',
+                'item': {'type': 'UserMessage', 'content': [{'type': 'local_image', 'path': '/missing/old-image.png'}]}}}) + '\n')
+        before = root_page.read_bytes()
+        destination = self.root / 'fallback-prepared'
+        self.assertEqual(lineage.prepare_lineage(self.source, destination, self.thread,
+            [('/foreign/Nexus', str(self.nexus))], fallback_root=self.nexus), 1)
+        rows = [json.loads(line) for line in (destination / root_page.relative_to(self.source)).read_text().splitlines()]
+        self.assertEqual(rows[0]['payload']['cwd'], str(self.nexus))
+        self.assertEqual(rows[-2]['payload']['cwd'], '/missing/other/project')
+        report_path = destination / 'cosyncx-path-report.json'
+        report = json.loads(report_path.read_text())
+        self.assertEqual(set(report['unmapped_working_directories']),
+                         {'/missing/source/project', '/missing/other/project'})
+        self.assertTrue(report['fallback_used'])
+        self.assertEqual(report['unavailable_local_files'], ['/missing/old-image.png'])
+        self.assertEqual(report_path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(root_page.read_bytes(), before)
+        with self.assertRaises(ns.SyncError):
+            lineage.prepare_lineage(self.source, self.root / 'unsafe-fallback', self.thread,
+                [('/foreign/Nexus', str(self.nexus))], fallback_root=self.root)
+
 
 if __name__ == '__main__': unittest.main()
