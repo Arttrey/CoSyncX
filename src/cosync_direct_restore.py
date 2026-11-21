@@ -441,6 +441,28 @@ class DirectReceiver:
             if self.excluded_thread_ids & set(prior['verified']):
                 return None
             if not source_same:
+                if prior.get('phase') == 'indexing':
+                    snapshot = prior.get('index_snapshot')
+                    if (not isinstance(snapshot, dict) or set(snapshot) != {'kinds', 'names', 'edges', 'graph'}
+                            or not isinstance(snapshot['kinds'], dict) or not isinstance(snapshot['names'], dict)
+                            or not isinstance(snapshot['edges'], list) or not isinstance(snapshot['graph'], dict)
+                            or set(snapshot['kinds']) != set(prior.get('expected', {}))
+                            or self.excluded_thread_ids & set(snapshot['kinds'])):
+                        return None
+                    # Do not unarchive a thread just because the interrupted
+                    # operation was started before its local state changed.
+                    if any(any(item['folder'] != 'sessions' for item in local.get(identity, []))
+                           for identity in snapshot['kinds']):
+                        return None
+                    db_names = {name for name in saved['files'] if name.startswith(('state_', 'thread_history_'))
+                                and name.endswith('.sqlite')}
+                    current_db_names = {path.name for pattern in ('state_*.sqlite', 'thread_history_*.sqlite')
+                                        for path in self.profile.glob(pattern)}
+                    if not db_names or db_names != current_db_names:
+                        return None
+                    if self._resume_indexing(prior, snapshot['kinds'], snapshot['kinds'], snapshot['names'],
+                                             snapshot['edges'], snapshot['graph'], db_names) is None:
+                        return None
                 if (prior.get('phase') != 'indexed' or not isinstance(prior.get('source_fingerprints'), dict)
                         or set(prior['verified']) != set(prior['source_fingerprints'])
                         or not set(prior['threads']) <= set(prior['verified'])):
@@ -696,7 +718,10 @@ class DirectReceiver:
                 expected[identity] = ns._digest(items[0]['path'])
             record.update({'verified': verified, 'expected': expected, 'index_queue': [list(item) for item in to_index],
                            'next_index': 0, 'database_state': self._database_state(dbs),
-                           'local_title_state': self._title_state(), 'phase': 'indexing'})
+                           'local_title_state': self._title_state(), 'phase': 'indexing',
+                           'index_snapshot': {'kinds': kinds, 'names': {identity: names[identity] for identity in incoming
+                                                                        if identity in names},
+                                              'edges': edges, 'graph': graph}})
             self._write_journal(record)
             return self._resume_indexing(record, incoming, kinds, names, edges, graph, set(dbs))
 

@@ -32,6 +32,10 @@ applied after indexing; missing-path reports remain unsupported.
 sessions untouched. This is useful for a conversation continued on another
 device; changing its display name does not change its ID.
 An indexed restore keeps its reload event until the status is published. An
+interrupted indexing pass retains its authenticated metadata so it can finish
+before a newer source revision is processed, provided the local state has not
+changed and no affected thread has since been excluded or archived. Older
+incomplete journals without this metadata remain pending for review. An
 interrupted write is retried only when the backup, databases, titles and
 affected histories still match the expected state; otherwise it waits for
 review. The watcher is not installed or enabled automatically and must not be

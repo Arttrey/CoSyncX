@@ -131,6 +131,57 @@ class DirectRestoreTests(unittest.TestCase):
             self.assertFalse((backups / 'direct-restore-carry.json').exists())
             self.assertFalse((backups / 'direct-restore-pending.json').exists())
 
+    def test_source_change_during_interrupted_indexing_is_reconciled(self):
+        with tempfile.TemporaryDirectory(prefix='cosyncx-index-new-source-') as tmp:
+            root = Path(tmp).resolve()
+            source, titles, graph, profile, backups, project = (root / name for name in
+                ('source', 'titles', 'graph', 'profile', 'backups', 'project'))
+            for path in (source, titles, graph, profile, backups, project):
+                path.mkdir(mode=0o700)
+            sessions = source / 'sessions'; sessions.mkdir()
+            identity = '019b0000-0000-7000-8000-000000000071'
+            meta = {'id': identity, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': '/source/Nexus',
+                    'originator': 'codex_vscode', 'cli_version': '0.1.0', 'source': 'vscode',
+                    'model_provider': 'openai', 'history_mode': 'paginated'}
+            history = sessions / f'rollout-2026-01-01T00-00-00-{identity}.jsonl'
+            history.write_text(json.dumps({'timestamp': meta['timestamp'], 'type': 'session_meta',
+                                           'payload': meta, 'ordinal': 0}) + '\n')
+            (titles / 'session_index.jsonl').write_text(json.dumps({'id': identity, 'thread_name': 'test'}) + '\n')
+            (graph / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1', 'edges': [],
+                'omitted_missing': 0, 'omitted_archived': 0}))
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                db.execute('CREATE TABLE threads (id TEXT PRIMARY KEY, archived INTEGER)')
+            with sqlite3.connect(profile / 'thread_history_1.sqlite') as db:
+                db.execute('CREATE TABLE example (id INTEGER)')
+            args = dict(source=source, titles=titles, graph=graph, profile=profile, backup_root=backups,
+                key=b'k' * 32, mappings=[('/source/Nexus', str(project))], codex=Path(sys.executable),
+                folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0)
+            calls = []
+            def index(_profile, thread, *_args, **_kwargs):
+                calls.append(thread)
+                if len(calls) == 1:
+                    raise ns.SyncError('synthetic interruption')
+                with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                    db.execute('INSERT OR IGNORE INTO threads VALUES (?, 0)', (thread,))
+                (profile / 'session_index.jsonl').write_text(json.dumps({'id': thread, 'thread_name': 'test'}) + '\n')
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True), \
+                    patch('cosync_direct_restore.indexer._index_profile', side_effect=index), \
+                    patch('cosync_direct_restore.indexer._reset_profile_projection'):
+                with self.assertRaises(ns.SyncError):
+                    DirectReceiver(**args)._receive()
+                original = json.loads((backups / 'direct-restore-pending.json').read_text())['event_id']
+                with history.open('a') as out:
+                    out.write(json.dumps({'timestamp': '2026-01-01T00:00:01.000Z', 'type': 'event_msg',
+                        'ordinal': 1, 'payload': {'type': 'agent_message', 'message': 'later source'}}) + '\n')
+                excluded = DirectReceiver(**args, excluded_thread_ids=[identity])
+                self.assertIsNone(excluded._receive())
+                self.assertEqual(len(calls), 1)
+                receiver = DirectReceiver(**args)
+                self.assertEqual(receiver._receive(), 1)
+                carry = receiver._read_carry()
+                self.assertEqual(carry, [{'id': original, 'count': 1}])
+            self.assertIn(b'later source', (profile / 'sessions' / history.name).read_bytes())
+
     def test_resume_after_one_indexed_chat_does_not_repeat_it(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-index-resume-') as tmp:
             root = Path(tmp).resolve()
