@@ -22,6 +22,11 @@ not persist a remote sequence alone across Syncthing index resets.
 The direct-folder pipeline is currently limited to disposable mock profiles;
 it does not receive real chats. The optional macOS menu-bar status is read-only
 and reports Syncthing transfer progress, not successful restoration.
+An uninstalled direct-receiver prototype handles previously absent single-page
+chats only when Cursor and Codex are quiet. It defers existing and archived IDs,
+nonempty relationship graphs, multi-page histories and missing-path reports. It
+does not provide automatic crash recovery or a durable reload event, and must
+not be enabled for a real profile yet.
 The mock pipeline can wait for histories, titles and relationship metadata as
 three independent folders. It defers any nonempty relationship graph until a
 complete, verified child-restore transaction is available.
