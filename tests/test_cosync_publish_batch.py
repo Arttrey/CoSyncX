@@ -28,6 +28,10 @@ class PublishBatchTests(unittest.TestCase):
             self.assertEqual(run_titles(cfg), {'PUBLISHED': 2})
             actual = {row['id']: row['thread_name'] for row in map(json.loads, dst.read_text().splitlines())}
             self.assertEqual(actual, {ids[0]: 'new one', ids[1]: 'new two', other: 'keep'})
+            src.write_text(lines([(ids[0], 'changed locally'), (ids[1], 'changed locally')]))
+            cache = {ids[0]: (None, 'WAITING_REMOTE', False), ids[1]: (None, 'TIE', False)}
+            self.assertEqual(run_titles(cfg, cache), {'WAITING_HISTORY': 2})
+            self.assertNotIn('changed locally', dst.read_text())
 
     def test_publishes_selected_chat_and_waits_for_remote_only_change(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -40,8 +44,9 @@ class PublishBatchTests(unittest.TestCase):
             src, dst = profile / 'sessions' / name, exchange / 'sessions' / name
             metadata = json.dumps({'type': 'session_meta', 'payload': {'id': identity, 'cwd': '/local/Nexus',
                                                                       'source': 'vscode'}}) + '\n'
-            src.write_text(metadata + '{"msg":"local"}\n')
-            dst.write_text(metadata + '{"msg":"remote"}\n')
+            def msg(text): return json.dumps({'type': 'event_msg', 'payload': {'type': 'user_message', 'message': text}}) + '\n'
+            src.write_text(metadata + msg('local') + msg('local 2'))
+            dst.write_text(metadata + msg('remote'))
             config = {'profile': str(profile), 'exchange': str(exchange), 'local_root': '/local/Nexus',
                       'remote_root': '/remote/Nexus', 'slots': [{'id': identity, 'source': str(src),
                       'destination': str(dst), 'state_dir': str(state)}]}
@@ -49,7 +54,7 @@ class PublishBatchTests(unittest.TestCase):
             self.assertEqual(run_once(config, cache), {'PUBLISHED': 1})
             self.assertEqual(dst.read_text(), src.read_text())
             self.assertEqual(run_once(config, cache), {'UNCHANGED': 1})
-            dst.write_text(src.read_text() + '{"msg":"remote update"}\n')
+            dst.write_text(src.read_text() + msg('remote update'))
             self.assertEqual(run_once(config, cache), {'WAITING_REMOTE': 1})
             self.assertIn('remote update', dst.read_text())
 

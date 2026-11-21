@@ -151,7 +151,8 @@ def prepare_flattened_mock(source: Path, destination: Path, thread_id: str,
 
 
 def _prepare_flattened(source: Path, destination: Path, thread_id: str,
-                       mappings: list[tuple[str, str]], *, fallback_root: Path | None = None) -> int:
+                       mappings: list[tuple[str, str]], *, fallback_root: Path | None = None,
+                       preserve_unmapped_history: bool = False) -> int:
     """Prepare a lineage only in a new temporary directory; source is read-only."""
     source = source.resolve(strict=True)
     destination = destination.parent.resolve(strict=True) / destination.name
@@ -162,7 +163,8 @@ def _prepare_flattened(source: Path, destination: Path, thread_id: str,
         raise ns.SyncError('Mock flatten directories overlap')
     with tempfile.TemporaryDirectory(prefix='cosyncx-flat-stage-') as temp:
         prepared = Path(temp).resolve() / 'prepared'
-        lineage.prepare_lineage(source, prepared, thread_id, mappings, fallback_root=fallback_root)
+        lineage.prepare_lineage(source, prepared, thread_id, mappings, fallback_root=fallback_root,
+                                preserve_unmapped_history=preserve_unmapped_history)
         items = ns._chat_catalog(prepared, include_unsupported=True)[thread_id]
         pages = {lineage._page_id(item['path'], thread_id): item for item in items}
         parents = {page: str(item['history_base']['thread_id']) for page, item in pages.items()

@@ -144,5 +144,23 @@ class LineageTests(unittest.TestCase):
             lineage.prepare_lineage(self.source, self.root / 'unsafe-fallback', self.thread,
                 [('/foreign/Nexus', str(self.nexus))], fallback_root=self.root)
 
+    def test_preserves_unmapped_historical_path_but_rejects_unknown_workspace(self):
+        root_page = self._write(cwd='/foreign/Nexus')
+        with root_page.open('a') as out:
+            out.write(json.dumps({'type': 'turn_context', 'ordinal': 2,
+                                  'payload': {'cwd': '/other/device/project'}}) + '\n')
+        target = self.root / 'preserved'
+        lineage.prepare_lineage(self.source, target, self.thread, [('/foreign/Nexus', str(self.nexus))],
+                                preserve_unmapped_history=True)
+        rows = [json.loads(line) for line in (target / root_page.relative_to(self.source)).read_text().splitlines()]
+        self.assertEqual(rows[0]['payload']['cwd'], str(self.nexus))
+        self.assertEqual(rows[-1]['payload']['cwd'], '/other/device/project')
+        report = json.loads((target / 'cosyncx-path-report.json').read_text())
+        self.assertIn('/other/device/project', report['unmapped_working_directories'])
+        self._write(cwd='/unknown/project')
+        with self.assertRaises(ns.SyncError):
+            lineage.prepare_lineage(self.source, self.root / 'missing-workspace', self.thread,
+                                    [('/foreign/Nexus', str(self.nexus))], preserve_unmapped_history=True)
+
 
 if __name__ == '__main__': unittest.main()

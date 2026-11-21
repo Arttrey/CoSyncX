@@ -45,6 +45,9 @@ Cursor and Codex to close. Keep a backup before enabling concurrent use.
 `--allow-sendreceive-source` permits the watcher to observe a Syncthing folder
 explicitly configured as send-and-receive. It does not configure Syncthing,
 export local chats, or resolve conflicting versions.
+The opt-in `--prefer-more-messages` restore policy selects the history with
+more visible user and assistant messages. A tie with different messages,
+unsupported content, unavailable workspace, or active writer is deferred.
 `python -m cosync_publish_chat` experimentally publishes one existing local
 history to its matching exchange file. The `--replace-initial` flag explicitly
 permits the first replacement; one previous exchange version is kept in a
@@ -56,7 +59,8 @@ can publish an explicitly configured set of single-page histories and their
 titles. It defers histories with multiple pages or externally referenced pages;
 it does not discover new chats or export relationships. A separate guarded
 multi-page replacement helper preserves previous pages and requires the
-exchange folder to be paused.
+exchange folder to be paused. The batch sender compares visible message counts;
+it does not assume the largest file or latest filesystem timestamp is newer.
 An indexed restore keeps its reload event until the status is published. An
 interrupted indexing pass retains its authenticated metadata so it can finish
 before a newer source revision is processed, provided the local state has not

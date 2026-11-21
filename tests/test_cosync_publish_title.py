@@ -1,12 +1,30 @@
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 
-from cosync_publish_title import publish_title
+from cosync_publish_title import history_authority, publish_title
 
 
 class PublishTitleTests(unittest.TestCase):
+    def test_title_waits_for_fresh_successful_history_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp).resolve() / 'health.json'
+            def write(state, when):
+                path.write_text(json.dumps({'state': state, 'updated_at_ms': when}))
+                path.chmod(0o600)
+            now = int(time.time() * 1000)
+            write('PUBLISHED', now)
+            self.assertEqual(history_authority(path), 'PUBLISHED')
+            write('WAITING_REMOTE', now)
+            self.assertIsNone(history_authority(path))
+            write('PUBLISHED', now - 100000)
+            self.assertIsNone(history_authority(path))
+            write('PUBLISHED', now)
+            path.chmod(0o644)
+            self.assertIsNone(history_authority(path))
+
     def test_merges_one_title_and_defers_conflicts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()

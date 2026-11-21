@@ -8,6 +8,26 @@ import nexus_sync as ns
 
 
 class PublishChatTests(unittest.TestCase):
+    def test_more_messages_wins_and_divergent_equal_count_is_deferred(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source, exchange, state = (root / x for x in ('source', 'exchange', 'state'))
+            for directory in (source, exchange, state): directory.mkdir(mode=0o700)
+            name = 'rollout-2026-01-01T00-00-00-019b0000-0000-7000-8000-000000000001.jsonl'
+            src, dst = source / name, exchange / name
+            def msg(text): return json.dumps({'type': 'event_msg', 'payload': {'type': 'user_message', 'message': text}}) + '\n'
+            local = msg('local'); remote = msg('remote') + msg('remote 2')
+            src.write_text(local); dst.write_text(remote)
+            args = {'prefer_more': True, 'path_roots': ('/local', '/remote'), 'replace_initial': True}
+            self.assertEqual(publish(src, dst, state, **args), 'WAITING_REMOTE')
+            self.assertEqual(dst.read_text(), remote)
+            src.write_text(local + msg('different'))
+            self.assertEqual(publish(src, dst, state, **args), 'TIE')
+            src.write_text(local + msg('different') + msg('third'))
+            self.assertEqual(publish(src, dst, state, **args), 'PUBLISHED')
+            self.assertEqual(dst.read_text(), src.read_text())
+            self.assertEqual((state / 'latest.jsonl').read_text(), remote)
+
     def test_preserves_backup_and_defers_external_change(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()

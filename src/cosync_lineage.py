@@ -53,7 +53,8 @@ def _map_cwd(cwd: str, mappings: list[tuple[str, str]]) -> str:
 
 
 def prepare_lineage(incoming: Path, destination: Path, thread_id: str,
-                    mappings: list[tuple[str, str]], *, fallback_root: Path | None = None) -> int:
+                    mappings: list[tuple[str, str]], *, fallback_root: Path | None = None,
+                    preserve_unmapped_history: bool = False) -> int:
     """Rewrite structured cwd fields and inherited byte offsets in a new copy.
 
     This is an experiment for isolated profiles only; it never updates the
@@ -67,7 +68,7 @@ def prepare_lineage(incoming: Path, destination: Path, thread_id: str,
     if ('.codex' in {x.casefold() for x in destination.parts} or destination.exists()
             or destination.is_symlink() or incoming == parent or incoming in parent.parents):
         raise ns.SyncError('Destination must be a new isolated directory')
-    if not mappings:
+    if not mappings or type(preserve_unmapped_history) is not bool:
         raise ns.SyncError('No path mappings')
     fallback = None
     if fallback_root is not None:
@@ -163,7 +164,8 @@ def prepare_lineage(incoming: Path, destination: Path, thread_id: str,
                                     payload['cwd'] = _map_cwd(cwd, mappings)
                                     changed = True
                                 except ns.SyncError:
-                                    if fallback is None:
+                                    if fallback is None and (not preserve_unmapped_history or
+                                            (record.get('type') == 'session_meta' and page in leaves)):
                                         raise
                                     # Keep historical contexts intact. Only a
                                     # leaf session gets the explicit workspace
@@ -172,7 +174,7 @@ def prepare_lineage(incoming: Path, destination: Path, thread_id: str,
                                     unmapped.add(cwd)
                                     if len(unmapped) > 10000:
                                         raise ns.SyncError('Too many unmapped working directories')
-                                    if record.get('type') == 'session_meta' and page in leaves:
+                                    if fallback is not None and record.get('type') == 'session_meta' and page in leaves:
                                         payload['cwd'] = str(fallback)
                                         fallback_used = True
                                         changed = True

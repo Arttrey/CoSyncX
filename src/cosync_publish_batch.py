@@ -45,6 +45,7 @@ def run_once(config, cache):
         try:
             blocked = check_paths(slot, profile, exchange, local_catalog, remote_catalog)
             if blocked:
+                cache.pop(slot['id'], None)
                 counts[blocked] += 1
                 continue
             before = (_fingerprint(source), _fingerprint(dest))
@@ -53,10 +54,10 @@ def run_once(config, cache):
                 result = cached[1]
             else:
                 result = publisher.publish(source, dest, Path(slot['state_dir']), replace_initial=True,
-                    prefer_local=True, path_roots=(config['local_root'], config['remote_root']))
+                    prefer_more=True, path_roots=(config['local_root'], config['remote_root']))
                 after = (_fingerprint(source), _fingerprint(dest))
-                if before[0] == after[0] and result in ('PUBLISHED', 'UNCHANGED', 'WAITING_REMOTE', 'CONFLICT'):
-                    cache[slot['id']] = (after, 'UNCHANGED' if result == 'PUBLISHED' else result)
+                if before[0] == after[0] and result in ('PUBLISHED', 'UNCHANGED', 'WAITING_REMOTE', 'CONFLICT', 'TIE'):
+                    cache[slot['id']] = (after, 'UNCHANGED' if result == 'PUBLISHED' else result, result == 'PUBLISHED')
                 else:
                     cache.pop(slot['id'], None)
             counts[result] += 1
@@ -66,15 +67,21 @@ def run_once(config, cache):
     return dict(counts)
 
 
-def run_titles(config):
+def run_titles(config, cache=None):
     counts = Counter()
     source, destination, lock = (Path(config[key]) for key in ('title_source', 'title_destination', 'title_lock'))
     for slot in config['slots']:
         try:
+            cached = cache.get(slot['id']) if cache is not None else None
+            if cache is not None and (not cached or cached[1] in ('WAITING_REMOTE', 'CONFLICT', 'TIE')):
+                counts['WAITING_HISTORY'] += 1
+                continue
             state = Path(slot['state_dir']) / 'title'
             state.mkdir(mode=0o700, exist_ok=True)
             result = titles.publish_title(source, destination, state, slot['id'], replace_initial=True,
-                                          prefer_local=True, lock_file=lock)
+                                          prefer_local=bool(cached and len(cached) > 2 and cached[2]), lock_file=lock)
+            if cached and len(cached) > 2 and result in ('PUBLISHED', 'UNCHANGED'):
+                cache[slot['id']] = (cached[0], cached[1], False)
             counts[result] += 1
         except (OSError, ValueError, ns.SyncError):
             counts['RETRY'] += 1
@@ -96,7 +103,7 @@ def main():
                 raise ns.SyncError('Invalid publisher configuration')
             config = json.loads(args.config.read_text())
             counts = run_once(config, cache)
-            title_counts = (run_titles(config) if all(key in config for key in
+            title_counts = (run_titles(config, cache) if all(key in config for key in
                             ('title_source', 'title_destination', 'title_lock')) else {})
             fd, temp = tempfile.mkstemp(prefix='.health-', dir=args.config.parent)
             try:

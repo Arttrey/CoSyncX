@@ -21,6 +21,7 @@ import cosync_auto_gate
 import cosync_engine
 import cosync_graph_snapshot as graph_schema
 import cosync_lineage as lineage
+import cosync_message_policy as message_policy
 import cosync_quiescence as quiescence
 import cosync_receive_plan
 import cosync_restore_backup as backup
@@ -36,7 +37,8 @@ import nexus_sync as ns
 class DirectReceiver:
     def __init__(self, *, source: Path, titles: Path, graph: Path, profile: Path, backup_root: Path,
                  key: bytes, mappings: list[tuple[str, str]], codex: Path, folder_ids: tuple[str, str, str],
-                 peer_id: str, quiet_seconds: float = 5, excluded_thread_ids=(), allow_active: bool = False):
+                 peer_id: str, quiet_seconds: float = 5, excluded_thread_ids=(), allow_active: bool = False,
+                 prefer_more_messages: bool = False):
         paths = [Path(x).resolve(strict=True) for x in (source, titles, graph, profile, backup_root)]
         if any(not p.is_dir() for p in paths) or len(key) != 32 or not mappings:
             raise ns.SyncError('Invalid direct receiver configuration')
@@ -61,6 +63,9 @@ class DirectReceiver:
         if type(allow_active) is not bool or (allow_active and sys.platform not in ('darwin', 'linux')):
             raise ns.SyncError('Concurrent restore is unavailable on this platform')
         self.allow_active = allow_active
+        if type(prefer_more_messages) is not bool:
+            raise ns.SyncError('Invalid message comparison policy')
+        self.prefer_more_messages = prefer_more_messages
         self.codex = Path(codex).resolve(strict=True)
         if not self.codex.is_file():
             raise ns.SyncError('Codex executable unavailable')
@@ -453,6 +458,49 @@ class DirectReceiver:
                     skipped.update(self.pending_busy_ids)
             except (quiescence.QuiescenceError, locking.MockChatBusy, FileNotFoundError):
                 return None
+        if self.prefer_more_messages and prior is None:
+            with tempfile.TemporaryDirectory(prefix='cosyncx-message-policy-') as tmp:
+                for number, (identity, entries) in enumerate(incoming.items()):
+                    current = local.get(identity, [])
+                    if identity in skipped:
+                        continue
+                    if current and (len(current) != 1 or current[0]['folder'] != 'sessions'):
+                        skipped.add(identity)
+                        self.pending_busy_ids |= frozenset((identity,))
+                        continue
+                    try:
+                        if (not current or source_kinds[identity] != 'chat') and len(entries) == 1:
+                            cwd = entries[0].get('cwd')
+                            if not isinstance(cwd, str): raise ns.SyncError('Working directory unavailable')
+                            lineage._map_cwd(cwd, self.mappings)
+                            continue
+                        stage = Path(tmp) / ('source-' + str(number))
+                        if len(entries) == 1:
+                            lineage.prepare_lineage(self.source, stage, identity, self.mappings,
+                                                    preserve_unmapped_history=True)
+                        else:
+                            if source_kinds[identity] != 'chat': raise ns.SyncError('Unsupported multi-page history')
+                            pages = {lineage._page_id(item['path'], identity) for item in entries}
+                            if any(isinstance(item.get('history_base'), dict)
+                                   and item['history_base'].get('thread_id') in pages
+                                   for other, others in all_incoming.items() if other != identity for item in others):
+                                raise ns.SyncError('Referenced multi-page history')
+                            indexer._prepare_flattened(self.source, stage, identity, self.mappings,
+                                                       preserve_unmapped_history=True)
+                        staged = ns._chat_catalog(stage, include_unsupported=True).get(identity, [])
+                        if len(staged) != 1: raise ns.SyncError('History comparison unavailable')
+                        if not current or source_kinds[identity] != 'chat':
+                            continue
+                        snapshot = Path(tmp) / ('local-' + str(number) + '.jsonl')
+                        ns._copy_stable_chat(current[0]['path'], snapshot)
+                        choice = message_policy.choose(staged[0]['path'], snapshot,
+                                                       self.mappings[0][1], self.mappings[0][1])
+                        if choice in ('TARGET_MORE', 'TIE'):
+                            skipped.add(identity)
+                            self.pending_busy_ids |= frozenset((identity,))
+                    except (ns.SyncError, OSError, ValueError):
+                        skipped.add(identity)
+                        self.pending_busy_ids |= frozenset((identity,))
         for identity, entries in incoming.items():
             if source_kinds[identity] == 'subagent' and entries[0].get('parent_thread_id') not in incoming:
                 skipped.add(identity)
@@ -638,7 +686,8 @@ class DirectReceiver:
                 stage = Path(temp).resolve() / str(number)
                 if len(entries) == 1:
                     lineage.prepare_lineage(self.source, stage, identity, self.mappings,
-                                            fallback_root=Path(self.mappings[0][1]))
+                                            fallback_root=None if self.prefer_more_messages else Path(self.mappings[0][1]),
+                                            preserve_unmapped_history=self.prefer_more_messages)
                 else:
                     if kinds[identity] != 'chat':
                         return None
@@ -650,7 +699,8 @@ class DirectReceiver:
                                item['history_base'].get('thread_id') in page_ids for item in other_entries):
                             return None
                     indexer._prepare_flattened(self.source, stage, identity, self.mappings,
-                                               fallback_root=Path(self.mappings[0][1]))
+                                               fallback_root=None if self.prefer_more_messages else Path(self.mappings[0][1]),
+                                               preserve_unmapped_history=self.prefer_more_messages)
                 report = stage / 'cosyncx-path-report.json'
                 if report.is_file() and not report.is_symlink():
                     path_reports[identity] = json.loads(report.read_bytes())
@@ -667,7 +717,12 @@ class DirectReceiver:
                     if relation not in ('EQUIVALENT_AFTER_PATH_MAPPING', 'LOCAL_EXTENDS_AFTER_PATH_MAPPING',
                                         'INCOMING_EXTENDS_AFTER_PATH_MAPPING', 'DIVERGED'):
                         return None
-                    replacement = staged[0]['path'] if relation in ('INCOMING_EXTENDS_AFTER_PATH_MAPPING', 'DIVERGED') else None
+                    if self.prefer_more_messages and kinds[identity] == 'chat':
+                        choice = message_policy.choose(staged[0]['path'], current[0]['path'], target, target)
+                        if choice not in ('SOURCE_MORE', 'EQUAL'): return None
+                        replacement = staged[0]['path'] if choice == 'SOURCE_MORE' else None
+                    else:
+                        replacement = staged[0]['path'] if relation in ('INCOMING_EXTENDS_AFTER_PATH_MAPPING', 'DIVERGED') else None
                     title_changed = expected_title is not None and local_titles.get(identity) != expected_title
                     current_digest = ns._digest(current[0]['path'])
                     if replacement is not None or title_changed or self.verified.get(identity) != (current_digest, expected_title):
@@ -898,6 +953,8 @@ def main(argv=None):
                         help='allow experimental restores while Cursor or Codex is running')
     parser.add_argument('--allow-sendreceive-source', action='store_true',
                         help='accept explicitly configured send-and-receive Syncthing source folders')
+    parser.add_argument('--prefer-more-messages', action='store_true',
+                        help='select the chat history with more visible messages')
     parser.add_argument('--experimental', action='store_true', required=True,
                         help='enable the incomplete prototype on a disposable profile')
     args = parser.parse_args(argv)
@@ -907,7 +964,8 @@ def main(argv=None):
         receiver = DirectReceiver(source=args.source, titles=args.titles, graph=args.graph, profile=args.profile,
             backup_root=args.backup_root, key=key, mappings=args.map_root, codex=args.codex,
             folder_ids=(args.sessions_folder_id, args.titles_folder_id, args.graph_folder_id), peer_id=args.peer_id,
-            excluded_thread_ids=args.exclude_thread_id, allow_active=args.allow_active)
+            excluded_thread_ids=args.exclude_thread_id, allow_active=args.allow_active,
+            prefer_more_messages=args.prefer_more_messages)
         sources = [cosync_syncthing_watch.SyncthingSource(client, folder, args.peer_id, path,
                     allow_sendreceive=args.allow_sendreceive_source) for folder, path in (
             (args.sessions_folder_id, args.source / 'sessions'), (args.titles_folder_id, args.titles),

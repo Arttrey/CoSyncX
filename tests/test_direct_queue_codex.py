@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import cosync_lineage as lineage
+import cosync_message_policy as message_policy
 from cosync_direct_restore import DirectReceiver
 from test_codex_contract import read_rpc_response, stop_server
 
@@ -102,7 +103,7 @@ class CodexQueueTests(unittest.TestCase):
             receiver = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
                 backup_root=backup, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
                 codex=codex, folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0,
-                allow_active=True)
+                allow_active=True, prefer_more_messages=True)
             state = {'state': 'idle', 'sequence': 1, 'remoteSequence': {'vps': 1}, 'needFiles': 0,
                      'needDirectories': 0, 'needSymlinks': 0, 'needDeletes': 0, 'errors': 0, 'pullErrors': 0}
             def read(folder): return lambda: (folder, state, True, 'valid')
@@ -179,6 +180,10 @@ raise SystemExit(1)
                     self.assertEqual(target.read_bytes(), busy_before)
                 self.assertIn('test message', json.dumps(call(4, 'thread/turns/list',
                                                              {'threadId': busy, 'itemsView': 'full'})))
+                listed = call(6, 'thread/items/list', {'threadId': busy, 'limit': 100})
+                visible = sum(1 for entry in listed['data'] if entry.get('item', {}).get('type')
+                              in ('userMessage', 'agentMessage'))
+                self.assertEqual(message_policy.message_count(target), visible)
             finally:
                 stop_server(server)
             with patch('cosync_direct_restore.quiescence.is_quiet', return_value=interrupt in ('write', 'write-concurrent-change')):

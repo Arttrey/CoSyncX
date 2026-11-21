@@ -8,6 +8,7 @@ import stat
 import tempfile
 import time
 
+import cosync_message_policy as policy
 import nexus_sync as ns
 
 
@@ -15,7 +16,8 @@ _NAME = re.compile(r'^rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4
 
 
 def publish(source: Path, destination: Path, state_dir: Path, *, replace_initial: bool = False,
-            prefer_local: bool = False, path_roots: tuple[str, str] | None = None) -> str:
+            prefer_local: bool = False, prefer_more: bool = False,
+            path_roots: tuple[str, str] | None = None) -> str:
     """Copy a complete stable history; retain one backup and defer conflicts."""
     source, destination, state_dir = map(Path, (source, destination, state_dir))
     if not all(p.is_absolute() for p in (source, destination, state_dir)):
@@ -40,11 +42,13 @@ def publish(source: Path, destination: Path, state_dir: Path, *, replace_initial
             raise ns.SyncError('Invalid publication state')
         if not isinstance(previous['digest'], str) or not re.fullmatch(r'[0-9a-f]{64}', previous['digest']):
             raise ns.SyncError('Invalid publication digest')
-    if prefer_local and (not isinstance(path_roots, tuple) or len(path_roots) != 2
+    if prefer_local and prefer_more:
+        raise ns.SyncError('Conflicting publication policies')
+    if (prefer_local or prefer_more) and (not isinstance(path_roots, tuple) or len(path_roots) != 2
                          or any(not isinstance(root, str) or not root for root in path_roots)):
         raise ns.SyncError('Path roots required for local conflict preference')
     before = ns._digest(destination)
-    if previous and before != previous['digest'] and not prefer_local:
+    if previous and before != previous['digest'] and not (prefer_local or prefer_more):
         return 'CONFLICT'
     if previous is None and not replace_initial:
         return 'NEEDS_INITIAL_APPROVAL'
@@ -55,6 +59,16 @@ def publish(source: Path, destination: Path, state_dir: Path, *, replace_initial
         if prefer_local and previous and before != previous['digest'] and digest == previous['digest']:
             return 'WAITING_REMOTE'
         changed = digest != before
+        if changed and prefer_more:
+            ns._copy_stable_chat(destination, old)
+            if ns._digest(old) != before or ns._digest(destination) != before:
+                return 'CONFLICT'
+            decision = policy.choose(snapshot, old, *path_roots)
+            if decision == 'TARGET_MORE': return 'WAITING_REMOTE'
+            if decision == 'TIE': return 'TIE'
+            if decision == 'EQUAL':
+                changed = False
+                digest = before
         if changed and prefer_local:
             relation = ns._path_adjusted_relation(snapshot, destination, *path_roots)
             if relation == 'EQUIVALENT_AFTER_PATH_MAPPING':
@@ -63,7 +77,7 @@ def publish(source: Path, destination: Path, state_dir: Path, *, replace_initial
             elif previous and before != previous['digest'] and relation == 'LOCAL_EXTENDS_AFTER_PATH_MAPPING':
                 return 'WAITING_REMOTE'
         if changed:
-            ns._copy_stable_chat(destination, old)
+            if not old.exists(): ns._copy_stable_chat(destination, old)
             if ns._digest(old) != before or ns._digest(destination) != before:
                 return 'CONFLICT'
             os.chmod(old, 0o600)
@@ -93,6 +107,7 @@ def main():
     parser.add_argument('--state-dir', required=True, type=Path)
     parser.add_argument('--replace-initial', action='store_true')
     parser.add_argument('--prefer-local', action='store_true')
+    parser.add_argument('--prefer-more-messages', action='store_true')
     parser.add_argument('--path-roots', nargs=2, metavar=('LOCAL_ROOT', 'REMOTE_ROOT'))
     parser.add_argument('--interval', type=int, default=30)
     args = parser.parse_args()
@@ -107,11 +122,11 @@ def main():
                 value = path.stat()
                 return (value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
             current_fingerprint = (fingerprint(args.source), fingerprint(args.destination))
-            if current_fingerprint == last_fingerprint and last_result in ('UNCHANGED', 'PUBLISHED', 'WAITING_REMOTE', 'CONFLICT'):
+            if current_fingerprint == last_fingerprint and last_result in ('UNCHANGED', 'PUBLISHED', 'WAITING_REMOTE', 'CONFLICT', 'TIE'):
                 result = 'UNCHANGED' if last_result == 'PUBLISHED' else last_result
             else:
                 result = publish(args.source, args.destination, args.state_dir, replace_initial=args.replace_initial,
-                                 prefer_local=args.prefer_local,
+                                 prefer_local=args.prefer_local, prefer_more=args.prefer_more_messages,
                                  path_roots=tuple(args.path_roots) if args.path_roots else None)
             after_fingerprint = (fingerprint(args.source), fingerprint(args.destination))
             last_fingerprint = after_fingerprint if current_fingerprint[0] == after_fingerprint[0] else None

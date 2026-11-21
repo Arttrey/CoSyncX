@@ -97,6 +97,25 @@ def publish_title(source: Path, destination: Path, state_dir: Path, thread_id: s
     return 'PUBLISHED' if changed else 'UNCHANGED'
 
 
+def history_authority(path: Path) -> str | None:
+    """Use only a fresh private result from the history publisher."""
+    try:
+        info = path.lstat()
+        if (not path.is_absolute() or not stat.S_ISREG(info.st_mode) or info.st_size > 4096
+                or (os.name != 'nt' and (info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077))):
+            return None
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        with os.fdopen(fd, 'rb') as stream:
+            opened = os.fstat(stream.fileno())
+            if (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino): return None
+            data = json.load(stream)
+        stamp = data.get('updated_at_ms') if isinstance(data, dict) else None
+        if type(stamp) is not int or not 0 <= int(time.time() * 1000) - stamp <= 90000: return None
+        return data.get('state') if data.get('state') in ('PUBLISHED', 'UNCHANGED') else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--source', required=True, type=Path)
@@ -106,14 +125,20 @@ def main():
     parser.add_argument('--replace-initial', action='store_true')
     parser.add_argument('--prefer-local', action='store_true')
     parser.add_argument('--lock-file', type=Path)
+    parser.add_argument('--history-health', type=Path)
     parser.add_argument('--interval', type=int, default=30)
     args = parser.parse_args()
     if not 10 <= args.interval <= 3600: parser.error('Invalid interval')
     while True:
         try:
-            result = publish_title(args.source, args.destination, args.state_dir, args.thread_id,
-                                   replace_initial=args.replace_initial, prefer_local=args.prefer_local,
-                                   lock_file=args.lock_file)
+            authority = history_authority(args.history_health) if args.history_health else None
+            if args.history_health and authority is None:
+                result = 'WAITING_HISTORY'
+            else:
+                result = publish_title(args.source, args.destination, args.state_dir, args.thread_id,
+                                       replace_initial=args.replace_initial,
+                                       prefer_local=(authority == 'PUBLISHED') if args.history_health else args.prefer_local,
+                                       lock_file=args.lock_file)
         except (OSError, ValueError, ns.SyncError):
             result = 'RETRY'
         try:
