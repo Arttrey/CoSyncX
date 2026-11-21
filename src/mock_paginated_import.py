@@ -466,6 +466,32 @@ def reset_mock_projection(profile: Path, shared: Path, backup_root: Path, key: b
     _reset_profile_projection(profile, backup_root, thread_id)
 
 
+def _validate_projection_schema(db):
+    expected = {
+        'thread_turns': {'thread_id', 'turn_id', 'rollout_ordinal', 'status', 'error_json', 'started_at',
+                         'completed_at', 'duration_ms', 'first_user_item_id', 'final_agent_item_id',
+                         'rollout_byte_offset', 'rollout_end_ordinal', 'rollout_end_byte_offset', 'root_turn_id'},
+        'thread_items': {'thread_id', 'turn_id', 'item_id', 'rollout_ordinal', 'created_at_ms', 'item_json',
+                         'item_type', 'updated_at_ordinal', 'started_at_ms', 'completed_at_ms'},
+        'thread_history_projection_state': {'thread_id', 'next_rollout_byte_offset', 'next_rollout_ordinal'},
+        'thread_realtime_items': {'thread_id', 'item_id', 'rollout_ordinal', 'created_at_ms', 'item_type', 'item_json'},
+    }
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+    if tables != set(expected) | {'_sqlx_migrations'}:
+        raise ns.SyncError('Unknown mock projection tables')
+    migrations = list(db.execute('SELECT version, success FROM _sqlx_migrations ORDER BY version'))
+    if migrations != [(number, 1) for number in range(1, 9)]:
+        raise ns.SyncError('Unknown mock projection migrations')
+    for table, columns in expected.items():
+        if {row[1] for row in db.execute('PRAGMA table_info(' + table + ')')} != columns:
+            raise ns.SyncError('Unknown mock projection schema')
+    extras = list(db.execute("SELECT type, name FROM sqlite_master WHERE type IN ('trigger', 'view')"))
+    if extras != [('trigger', 'thread_realtime_items_projection_cleanup')]:
+        raise ns.SyncError('Unknown mock projection triggers')
+    if db.execute('PRAGMA quick_check').fetchone() != ('ok',):
+        raise ns.SyncError('Mock projection database failed integrity check')
+
+
 def _reset_profile_projection(profile: Path, backup_root: Path, thread_id: str, *,
                               ignore_busy: frozenset[str] = frozenset()) -> None:
     """Reset one verified projection after the caller has guarded and backed up the profile."""
@@ -484,32 +510,10 @@ def _reset_profile_projection(profile: Path, backup_root: Path, thread_id: str, 
     if (not isinstance(manifest, dict) or not isinstance(manifest.get('files'), dict)
             or manifest['files'].get(database.name) != ns._digest(saved)):
         raise ns.SyncError('Mock projection backup mismatch')
-    expected = {
-        'thread_turns': {'thread_id', 'turn_id', 'rollout_ordinal', 'status', 'error_json', 'started_at',
-                         'completed_at', 'duration_ms', 'first_user_item_id', 'final_agent_item_id',
-                         'rollout_byte_offset', 'rollout_end_ordinal', 'rollout_end_byte_offset', 'root_turn_id'},
-        'thread_items': {'thread_id', 'turn_id', 'item_id', 'rollout_ordinal', 'created_at_ms', 'item_json',
-                         'item_type', 'updated_at_ordinal', 'started_at_ms', 'completed_at_ms'},
-        'thread_history_projection_state': {'thread_id', 'next_rollout_byte_offset', 'next_rollout_ordinal'},
-        'thread_realtime_items': {'thread_id', 'item_id', 'rollout_ordinal', 'created_at_ms', 'item_type', 'item_json'},
-    }
     with mock._mock_thread_lock(profile, thread_id, ignore_busy=ignore_busy):
         with closing(sqlite3.connect(database, timeout=1)) as db, db:
             db.execute('BEGIN IMMEDIATE')
-            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
-            if tables != set(expected) | {'_sqlx_migrations'}:
-                raise ns.SyncError('Unknown mock projection tables')
-            migrations = list(db.execute('SELECT version, success FROM _sqlx_migrations ORDER BY version'))
-            if migrations != [(number, 1) for number in range(1, 9)]:
-                raise ns.SyncError('Unknown mock projection migrations')
-            for table, columns in expected.items():
-                if {row[1] for row in db.execute('PRAGMA table_info(' + table + ')')} != columns:
-                    raise ns.SyncError('Unknown mock projection schema')
-            extras = list(db.execute("SELECT type, name FROM sqlite_master WHERE type IN ('trigger', 'view')"))
-            if extras != [('trigger', 'thread_realtime_items_projection_cleanup')]:
-                raise ns.SyncError('Unknown mock projection triggers')
-            if db.execute('PRAGMA quick_check').fetchone() != ('ok',):
-                raise ns.SyncError('Mock projection database failed integrity check')
+            _validate_projection_schema(db)
             for table in ('thread_items', 'thread_turns', 'thread_realtime_items', 'thread_history_projection_state'):
                 db.execute('DELETE FROM ' + table + ' WHERE thread_id = ?', (thread_id,))
 

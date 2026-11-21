@@ -23,6 +23,7 @@ import cosync_engine
 import cosync_graph_snapshot as graph_schema
 import cosync_lineage as lineage
 import cosync_message_policy as message_policy
+import cosync_orphan_restore as orphan_restore
 import cosync_quiescence as quiescence
 import cosync_receive_plan
 import cosync_restore_backup as backup
@@ -304,7 +305,7 @@ class DirectReceiver:
                 or any(not isinstance(op, dict) or op.get('before') is None or op.get('before') != op.get('after')
                        for op in operations)
                 or not isinstance(verified, dict) or not isinstance(snapshot, dict)
-                or snapshot.get('edges') != [] or self._read_carry()):
+                or snapshot.get('edges') != []):
             return False
         manifest = self.backup_root / 'latest' / 'manifest.json'
         if (manifest.is_symlink() or not manifest.is_file()
@@ -508,6 +509,15 @@ class DirectReceiver:
 
     def _receive(self, on_restore=None) -> int | None:
         journal = self.backup_root / 'direct-restore-pending.json'
+        orphan_journal = self.backup_root / 'direct-orphan-pending.json'
+        if orphan_journal.exists() or orphan_journal.is_symlink():
+            if journal.exists() or journal.is_symlink():
+                return None
+            try:
+                if not self._write_allowed() or not orphan_restore.resume(self, on_restore=on_restore):
+                    return None
+            except (ns.SyncError, locking.MockChatBusy, backup.BackupError, OSError, sqlite3.Error, ValueError):
+                return None
         self._read_carry()
         prior = self._read_journal() if journal.exists() or journal.is_symlink() else None
         if (journal.exists() or journal.is_symlink()) and not prior:
@@ -568,6 +578,7 @@ class DirectReceiver:
         # its history file. Such a thread and its children must stay local.
         database = self.profile / 'state_5.sqlite'
         indexed_ids = set()
+        indexed_paths = {}
         if database.is_symlink():
             return None
         if database.is_file() and set(incoming) - skipped:
@@ -579,6 +590,10 @@ class DirectReceiver:
                     rows = db.execute('SELECT id, archived FROM threads').fetchall()
                     indexed_ids = {row[0] for row in rows}
                     archived_ids = {row[0] for row in rows if row[1] == 1}
+                    columns = {row[1] for row in db.execute('PRAGMA table_info(threads)')}
+                    if {'rollout_path', 'cwd'} <= columns:
+                        indexed_paths = {row[0]: (row[1], row[2]) for row in
+                                         db.execute('SELECT id, rollout_path, cwd FROM threads WHERE archived=0')}
             except sqlite3.Error:
                 return None
             skipped.update(set(incoming) & archived_ids)
@@ -587,6 +602,29 @@ class DirectReceiver:
         # An indexed thread without its local history cannot safely be treated
         # as a new thread. Defer it and its descendants, not the whole batch.
         orphan_ids = (set(incoming) - skipped) & indexed_ids - set(local)
+        # A stale foreign path can be repaired only for an unambiguous child
+        # history whose parent is present and neither writer is active.
+        if prior is None and orphan_ids and indexed_paths:
+            try:
+                busy = locking._busy_thread_ids(self.profile) if self._write_allowed() else set(orphan_ids)
+                for identity in sorted(orphan_ids):
+                    entries = incoming[identity]
+                    parent = entries[0].get('parent_thread_id') if len(entries) == 1 else None
+                    if (source_kinds[identity] != 'subagent' or identity in busy or parent in busy
+                            or parent not in incoming or parent not in local or identity not in indexed_paths):
+                        continue
+                    old_path, old_cwd = indexed_paths[identity]
+                    try:
+                        if orphan_restore.prepare(self, identity, entries, old_path, old_cwd):
+                            if not orphan_restore.resume(self, on_restore=on_restore):
+                                return None
+                            local = ns._chat_catalog(self.profile, include_unsupported=True)
+                    except (ns.SyncError, locking.MockChatBusy, backup.BackupError, OSError, sqlite3.Error, ValueError):
+                        if orphan_journal.exists() or orphan_journal.is_symlink():
+                            return None
+                orphan_ids = (set(incoming) - skipped) & indexed_ids - set(local)
+            except (ns.SyncError, locking.MockChatBusy, OSError, ValueError):
+                pass
         skipped.update(orphan_ids)
         self.pending_busy_ids = frozenset(orphan_ids)
         self._ignored_busy = frozenset()

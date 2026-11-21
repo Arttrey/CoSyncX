@@ -100,9 +100,10 @@ class DirectMessagePolicyTests(unittest.TestCase):
             receiver = DirectReceiver.__new__(DirectReceiver)
             receiver.profile, receiver.backup_root, receiver.verified = profile, backup, {}
             entries = {identity: [{'path': history, 'folder': 'sessions'}]}
+            carry = [{'id': 'a' * 32, 'count': 1}]
             with patch('cosync_direct_restore.ns._chat_catalog', return_value=entries), \
                  patch('cosync_direct_restore.locking._busy_thread_ids', return_value=set()), \
-                 patch.object(receiver, '_read_carry', return_value=[]), \
+                 patch.object(receiver, '_read_carry', return_value=carry), \
                  patch.object(receiver, '_read_journal', return_value=record):
                 changed = {**record, 'threads': [identity]}
                 self.assertFalse(receiver._retire_unchanged_indexing(changed, journal))
@@ -112,6 +113,7 @@ class DirectMessagePolicyTests(unittest.TestCase):
                 indexed = {**record, 'phase': 'indexed'}
                 receiver._read_journal.return_value = indexed
                 self.assertTrue(receiver._retire_unchanged_indexing(indexed, journal))
+                self.assertEqual(receiver._read_carry(), carry)
             self.assertFalse(journal.exists())
             self.assertEqual(receiver.verified[identity], (digest, 'name'))
             self.assertEqual(history.read_text(), 'unchanged')

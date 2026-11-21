@@ -42,6 +42,11 @@ option permits restoration while Cursor or Codex is open on macOS and Linux;
 it uses individual writer locks and has only been tested with disposable
 profiles. Recovery from an interrupted file-writing operation still waits for
 Cursor and Codex to close. Keep a backup before enabling concurrent use.
+For a missing local subagent whose index still points to an unavailable foreign
+path, the receiver can restore an unambiguous received history, back up the
+databases, update that one path, and verify its index. A private authenticated
+journal resumes an interrupted repair; active writers and unknown database
+schemas are deferred.
 `--allow-sendreceive-source` permits the watcher to observe a Syncthing folder
 explicitly configured as send-and-receive. It does not configure Syncthing,
 export local chats, or resolve conflicting versions.
