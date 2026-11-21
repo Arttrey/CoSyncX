@@ -4,6 +4,7 @@ Archived IDs stay archived. Existing active versions are backed up before
 replacement. No profile write is attempted while Codex or Cursor runs.
 """
 import argparse
+from contextlib import closing
 import json
 import hashlib
 import hmac
@@ -406,6 +407,21 @@ class DirectReceiver:
                 if folders != {'archived_sessions'}:
                     return None
                 skipped.add(identity)
+        # Codex can mark a thread archived in SQLite before or without moving
+        # its history file. Such a thread and its children must stay local.
+        database = self.profile / 'state_5.sqlite'
+        if database.is_symlink():
+            return None
+        if database.is_file() and set(incoming) - skipped:
+            wal, shm = self.profile / 'state_5.sqlite-wal', self.profile / 'state_5.sqlite-shm'
+            if wal.is_symlink() or shm.is_symlink() or (wal.exists() and not shm.exists()):
+                return None
+            try:
+                with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as db:
+                    archived_ids = {row[0] for row in db.execute('SELECT id FROM threads WHERE archived = 1')}
+            except sqlite3.Error:
+                return None
+            skipped.update(set(incoming) & archived_ids)
         source_kinds = {identity: cosync_receive_plan.source_kind(entries) for identity, entries in incoming.items()}
         for identity, entries in incoming.items():
             if source_kinds[identity] == 'subagent' and entries[0].get('parent_thread_id') not in incoming:

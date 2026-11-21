@@ -322,6 +322,51 @@ class DirectRestoreTests(unittest.TestCase):
             with self.assertRaises(ns.SyncError):
                 DirectReceiver(**{**args, 'titles': nested})
 
+    def test_index_archived_chat_does_not_block_unrelated_chat(self):
+        with tempfile.TemporaryDirectory(prefix='cosyncx-index-archived-') as tmp:
+            root = Path(tmp).resolve()
+            source, titles, graph, profile, backups, project = (root / name for name in
+                ('source', 'titles', 'graph', 'profile', 'backups', 'project'))
+            for path in (source, titles, graph, profile, backups, project):
+                path.mkdir(mode=0o700)
+            incoming = source / 'sessions'; incoming.mkdir()
+            local = profile / 'sessions'; local.mkdir()
+            archived, child, other = ('019b0000-0000-7000-8000-000000000091',
+                '019b0000-0000-7000-8000-000000000092', '019b0000-0000-7000-8000-000000000093')
+            for identity in (archived, child, other):
+                meta = {'id': identity, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': '/source/Nexus',
+                        'originator': 'codex_vscode', 'cli_version': '0.1.0', 'source': 'vscode',
+                        'model_provider': 'openai', 'history_mode': 'paginated'}
+                if identity == child:
+                    meta.update({'source': {'subagent': {'other': 'guardian'}}, 'parent_thread_id': archived})
+                row = {'timestamp': meta['timestamp'], 'type': 'session_meta', 'payload': meta, 'ordinal': 0}
+                name = f'rollout-2026-01-01T00-00-00-{identity}.jsonl'
+                (incoming / name).write_text(json.dumps(row) + '\n')
+                if identity == archived:
+                    row['payload']['cwd'] = str(project)
+                    (local / name).write_text(json.dumps(row) + '\n')
+                    protected_path = local / name
+            before = protected_path.read_bytes()
+            (titles / 'session_index.jsonl').write_text(''.join(json.dumps({'id': identity, 'thread_name': 'test'}) + '\n'
+                                                               for identity in (archived, other)))
+            (graph / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1',
+                'edges': [{'parent': archived, 'child': child, 'status': 'closed'}],
+                'omitted_missing': 0, 'omitted_archived': 0}))
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                db.execute('CREATE TABLE threads (id TEXT, archived INTEGER)')
+                db.execute('INSERT INTO threads VALUES (?, 1)', (archived,))
+            receiver = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
+                backup_root=backups, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
+                codex=Path(sys.executable), folder_ids=('sessions', 'titles', 'graph'), peer_id='vps')
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True), \
+                    patch('cosync_direct_restore.indexer._index_profile') as indexer:
+                self.assertEqual(receiver._receive(), 1)
+            self.assertEqual(indexer.call_args.args[1], other)
+            self.assertEqual(protected_path.read_bytes(), before)
+            self.assertFalse((local / f'rollout-2026-01-01T00-00-00-{child}.jsonl').exists())
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                self.assertEqual(db.execute('SELECT archived FROM threads WHERE id=?', (archived,)).fetchone(), (1,))
+
     def test_existing_archived_history_is_not_made_active(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-keep-archive-') as tmp:
             root = Path(tmp).resolve()
