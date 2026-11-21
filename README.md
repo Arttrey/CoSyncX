@@ -31,6 +31,11 @@ experimental: external page references and later updates are not yet proven.
 The mock projection reset touches an undocumented Codex database and refuses
 unknown schemas; it must not be used on a real profile. The Cursor status-file
 and reload handler are prepared but are not connected to a live receiver.
+An isolated mock can restore one archived, single-page conversation after a
+backup that preserves duplicate local versions. It refuses descendants; interruption
+leaves a journal requiring review and blocks further backup rotation. There is
+an explicit mock-only rollback when all affected data still matches the
+expected versions; it is not connected to automatic recovery.
 The experimental `cosyncx prepare-lineage` command rewrites structured project
 paths and dependent byte offsets for a complete paginated thread into a new
 isolated directory. It does not import chats or rebuild the live Codex index.

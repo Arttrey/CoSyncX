@@ -4,6 +4,7 @@ from pathlib import Path
 import cosync_archive_plan
 import cosync_restore_backup as backup
 import mock_chat_sync as mock
+import mock_journal
 import nexus_sync as ns
 
 
@@ -16,6 +17,7 @@ def prepare(profile: Path, shared: Path, backup_root: Path, key: bytes, roots: l
         raise ns.SyncError('Invalid mock backup directories')
     if not roots:
         raise ns.SyncError('No mock archive roots')
+    mock_journal.ensure_clear(backup_root)
     with mock._mock_thread_lock(profile, roots[0]):
         impact = cosync_archive_plan.archive_impact(profile, roots)
         databases = sorted(set(profile.glob('state_*.sqlite')) | set(profile.glob('thread_history_*.sqlite')))

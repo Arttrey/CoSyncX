@@ -19,6 +19,7 @@ import cosync_lineage as lineage
 import cosync_receive_plan
 import cosync_restore_backup as backup
 import mock_chat_sync as mock
+import mock_journal
 import nexus_sync as ns
 
 
@@ -266,8 +267,7 @@ def update_thread(source: Path, profile: Path, shared: Path, backup_root: Path, 
                                 (profile, shared), (profile, backup_root), (shared, backup_root)))):
         raise ns.SyncError('Mock folders overlap')
     journal = backup_root / 'mock-update-pending.json'
-    if journal.exists() or journal.is_symlink():
-        raise ns.SyncError('Mock update requires recovery')
+    mock_journal.ensure_clear(backup_root)
     with tempfile.TemporaryDirectory(prefix='cosyncx-update-') as temp:
         prepared = Path(temp).resolve() / 'prepared'
         lineage.prepare_lineage(source, prepared, thread_id, mappings)
@@ -640,8 +640,7 @@ def replace_mock_titles(profile: Path, shared: Path, backup_root: Path, key: byt
                                                          for k, v in titles.items()):
         raise ns.SyncError('Invalid mock titles')
     journal = backup_root / 'mock-title-pending.json'
-    if journal.exists() or journal.is_symlink():
-        raise ns.SyncError('Mock title update requires recovery')
+    mock_journal.ensure_clear(backup_root)
     catalog = ns._chat_catalog(profile, include_unsupported=True)
     for thread in titles:
         entries = catalog.get(thread, [])

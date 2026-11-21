@@ -8,6 +8,7 @@ import cosync_receive_plan
 import cosync_restore_backup
 import mock_chat_sync as mock
 import mock_paginated_import as pages_import
+import mock_journal
 import nexus_sync as ns
 
 
@@ -78,10 +79,11 @@ class MockDirectReceiver:
                     or type(value.get('omitted_archived')) is not int or value['omitted_archived'] < 0
                     or value.get('edges') != []):
                 return False
-        if self.backup_root is not None and any((self.backup_root / name).exists()
-                or (self.backup_root / name).is_symlink()
-                for name in ('mock-title-pending.json', 'mock-update-pending.json')):
-            return False
+        if self.backup_root is not None:
+            try:
+                mock_journal.ensure_clear(self.backup_root)
+            except ns.SyncError:
+                return False
         incoming = ns._chat_catalog(self.source, include_unsupported=True)
         title_data = ns._read_title_index(self.titles) if self.titles is not None else None
         if self.titles is not None and title_data is None:

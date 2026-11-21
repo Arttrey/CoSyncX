@@ -7,6 +7,7 @@ import sqlite3
 import cosync_graph_snapshot as graph
 import cosync_restore_backup as backup
 import mock_chat_sync as mock
+import mock_journal
 import nexus_sync as ns
 
 
@@ -19,6 +20,7 @@ def apply_graph(profile: Path, shared: Path, backup_root: Path, graph_file: Path
             or any(a == b or a in b.parents or b in a.parents
                    for a, b in ((profile, shared), (profile, backup_root), (shared, backup_root)))):
         raise ns.SyncError('Invalid mock graph paths')
+    mock_journal.ensure_clear(backup_root)
     before = graph_file.stat()
     raw = graph_file.read_bytes()
     after = graph_file.stat()

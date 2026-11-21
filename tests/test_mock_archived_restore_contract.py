@@ -9,12 +9,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import cosync_lineage
 import cosync_archive_plan
 import cosync_restore_backup
 import mock_chat_sync
-import mock_paginated_import
 import mock_archive_backup
+import mock_archive_restore
 import nexus_sync
 from test_codex_contract import read_rpc_response, stop_server
 
@@ -86,6 +85,12 @@ class ArchivedRestoreContractTests(unittest.TestCase):
             self.assertEqual(impact['threads'], {parent, child})
             self.assertEqual(impact['archived'], 2)
             self.assertEqual(len(impact['files']), 2)
+            incoming = root / 'incoming'
+            incoming.mkdir()
+            with self.assertRaises(nexus_sync.SyncError):
+                mock_archive_restore.restore(incoming, profile, shared, backups, key, parent,
+                    [('/source/Nexus', str(project))], Path(shutil.which('codex')))
+            self.assertFalse((backups / 'mock-archive-pending.json').exists())
             prepared = mock_archive_backup.prepare(profile, shared, backups, key, [parent])
             self.assertEqual(prepared['threads'], 2)
             manifest = json.loads((backups / 'latest' / 'manifest.json').read_text())['files']
@@ -156,8 +161,6 @@ class ArchivedRestoreContractTests(unittest.TestCase):
                 migration = subprocess.run([shutil.which('codex'), 'migrate-rollouts', '--apply', '--json'],
                     env={**os.environ, 'CODEX_HOME': str(home)}, capture_output=True, text=True, timeout=30)
                 self.assertEqual(migration.returncode, 0, migration.stderr)
-            prepared = root / 'prepared'
-            cosync_lineage.prepare_lineage(source, prepared, thread, [('/source/Nexus', str(project))])
             def start():
                 server = subprocess.Popen([shutil.which('codex'), 'app-server', '--listen', 'stdio://'],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0,
@@ -182,26 +185,48 @@ class ArchivedRestoreContractTests(unittest.TestCase):
                 stop_server(server)
             archived = list((profile / 'archived_sessions').rglob(name))
             self.assertEqual(len(archived), 1)
-            selection = [archived[0].relative_to(profile).as_posix()]
+            duplicate = profile / 'archived_sessions' / 'duplicate' / name
+            duplicate.parent.mkdir()
+            shutil.copyfile(archived[0], duplicate)
+            duplicate.write_bytes(duplicate.read_bytes() + b'\n')
+            duplicate_data = duplicate.read_bytes()
+            duplicate_name = duplicate.relative_to(profile).as_posix()
+            selection = [archived[0].relative_to(profile).as_posix(), duplicate_name]
             selection += [path.name for path in profile.glob('state_*.sqlite')]
             selection += [path.name for path in profile.glob('thread_history_*.sqlite')]
-            latest = cosync_restore_backup.replace_latest(profile, backups, selection)
-            server = start()
-            try:
-                call(server, 2, 'thread/unarchive', {'threadId': thread})
-            finally:
-                stop_server(server)
-            active = list((profile / 'sessions').rglob(name))
-            self.assertEqual(len(active), 1)
-            # This assignment is only an isolated Codex contract experiment;
-            # it is not an implementation of the guarded live transaction.
-            local_folder.mkdir(parents=True, exist_ok=True)
-            active_path = active[0]
-            shutil.copyfile(prepared / 'sessions' / '2026' / '01' / '01' / name, active_path)
             with sqlite3.connect(profile / 'thread_history_1.sqlite') as db:
                 before_other = db.execute('SELECT count(*) FROM thread_items WHERE thread_id = ?', (other,)).fetchone()[0]
             self.assertGreater(before_other, 0)
-            mock_paginated_import.reset_mock_projection(profile, shared, backups, key, thread)
+            arguments = (source, profile, shared, backups, key, thread,
+                         [('/source/Nexus', str(project))], Path(shutil.which('codex')))
+            with patch.object(mock_archive_restore, '_unarchive', side_effect=nexus_sync.SyncError('test interruption')):
+                with self.assertRaises(nexus_sync.SyncError):
+                    mock_archive_restore.restore(*arguments)
+            journal = backups / 'mock-archive-pending.json'
+            self.assertTrue(journal.is_file())
+            with self.assertRaises(nexus_sync.SyncError):
+                mock_archive_restore.restore(*arguments)
+            with self.assertRaises(nexus_sync.SyncError):
+                mock_archive_backup.prepare(profile, shared, backups, key, [thread])
+            self.assertTrue((backups / 'latest' / selection[0]).is_file())
+            journal.unlink()  # Test-only acknowledgement: no live restore occurred.
+            with patch.object(mock_archive_restore.pages, 'reset_mock_projection',
+                              side_effect=nexus_sync.SyncError('test interrupted after replacing versions')):
+                with self.assertRaises(nexus_sync.SyncError):
+                    mock_archive_restore.restore(*arguments)
+            self.assertTrue(journal.is_file())
+            mock_archive_restore.rollback(profile, shared, backups, key)
+            self.assertFalse(journal.exists())
+            self.assertEqual(duplicate.read_bytes(), duplicate_data)
+            self.assertEqual(len(list((profile / 'archived_sessions').rglob(name))), 2)
+            mock_archive_restore.restore(source, profile, shared, backups, key, thread,
+                                         [('/source/Nexus', str(project))], Path(shutil.which('codex')),
+                                         title='synthetic remote title')
+            latest = backups / 'latest'
+            self.assertFalse((backups / 'mock-archive-pending.json').exists())
+            active = list((profile / 'sessions').rglob(name))
+            self.assertEqual(len(active), 1)
+            active_path = active[0]
             with sqlite3.connect(profile / 'thread_history_1.sqlite') as db:
                 self.assertEqual(db.execute('SELECT count(*) FROM thread_items WHERE thread_id = ?', (other,)).fetchone()[0], before_other)
             server = start()
@@ -214,6 +239,47 @@ class ArchivedRestoreContractTests(unittest.TestCase):
             finally:
                 stop_server(server)
             self.assertIn('synthetic local version', (latest / selection[0]).read_text())
+            self.assertEqual((latest / duplicate_name).read_bytes(), duplicate_data)
+            self.assertFalse(duplicate.exists())
+            server = start()
+            try:
+                call(server, 2, 'thread/archive', {'threadId': thread})
+            finally:
+                stop_server(server)
+            with patch.object(mock_archive_restore.pages, 'index_thread',
+                              side_effect=nexus_sync.SyncError('test interrupted after replacement')):
+                with self.assertRaises(nexus_sync.SyncError):
+                    mock_archive_restore.restore(*arguments)
+            self.assertTrue((backups / 'mock-archive-pending.json').is_file())
+            with self.assertRaises(nexus_sync.SyncError):
+                mock_archive_backup.prepare(profile, shared, backups, key, [thread])
+            self.assertTrue((backups / 'latest' / 'state_5.sqlite').is_file())
+            pending = json.loads((backups / 'mock-archive-pending.json').read_text())
+            collision = profile / pending['previous_files'][0]
+            collision.parent.mkdir(parents=True, exist_ok=True)
+            collision.write_text('unrelated file')
+            with self.assertRaises(nexus_sync.SyncError):
+                mock_archive_restore.rollback(profile, shared, backups, key)
+            self.assertEqual(collision.read_text(), 'unrelated file')
+            collision.unlink()
+            changed = list((profile / 'sessions').rglob(name))
+            self.assertEqual(len(changed), 1)
+            current = changed[0].read_bytes()
+            changed[0].write_bytes(current + b'\n')
+            with self.assertRaises(nexus_sync.SyncError):
+                mock_archive_restore.rollback(profile, shared, backups, key)
+            self.assertTrue((backups / 'mock-archive-pending.json').is_file())
+            changed[0].write_bytes(current)
+            mock_archive_restore.rollback(profile, shared, backups, key)
+            self.assertFalse((backups / 'mock-archive-pending.json').exists())
+            self.assertEqual(len(list((profile / 'sessions').rglob(name))), 0)
+            restored = list((profile / 'archived_sessions').rglob(name))
+            self.assertEqual(len(restored), 1)
+            self.assertIn('synthetic remote version', restored[0].read_text())
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                self.assertEqual(db.execute('SELECT archived FROM threads WHERE id=?', (thread,)).fetchone(), (1,))
+            with sqlite3.connect(profile / 'thread_history_1.sqlite') as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM thread_items WHERE thread_id=?', (other,)).fetchone()[0], before_other)
 
 
 if __name__ == '__main__': unittest.main()
