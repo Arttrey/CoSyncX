@@ -142,7 +142,8 @@ def _archive(profile: Path, executable: Path, thread: str) -> None:
 
 def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: bytes,
             thread: str, mappings: list[tuple[str, str]], executable: Path, *, title: str | None = None,
-            flatten_multi: bool = False, fallback_root: Path | None = None) -> None:
+            flatten_multi: bool = False, fallback_root: Path | None = None,
+            retain_journal: bool = False) -> None:
     source = mock._mock_path(source)
     profile = mock._validate_profile(profile, key)
     shared, backup_root = mock._mock_path(shared), mock._mock_path(backup_root)
@@ -282,7 +283,8 @@ def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: b
                     out.write(content)
                     out.flush()
                     os.fsync(out.fileno())
-            journal.unlink()
+            if not retain_journal:
+                journal.unlink()
             return {'mock_only': True, 'path_report': output_report}
         except Exception as exc:
             # A subprocess timeout may mean our own Codex process still uses

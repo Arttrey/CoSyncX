@@ -2,7 +2,8 @@
 import nexus_sync as ns
 
 
-PENDING = ('mock-title-pending.json', 'mock-update-pending.json', 'mock-archive-pending.json', 'mock-child-pending.json')
+PENDING = ('mock-title-pending.json', 'mock-update-pending.json', 'mock-archive-pending.json', 'mock-child-pending.json',
+           'mock-group-pending.json')
 
 
 def ensure_clear(backup_root, *, except_name=None):

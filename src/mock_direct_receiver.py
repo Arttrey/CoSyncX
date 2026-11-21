@@ -7,6 +7,7 @@ import cosync_auto_gate
 import cosync_receive_plan
 import cosync_restore_backup
 import mock_chat_sync as mock
+import mock_group_restore
 import mock_paginated_import as pages_import
 import mock_journal
 import nexus_sync as ns
@@ -52,7 +53,7 @@ class MockDirectReceiver:
 
     def _chat_digests(self):
         catalog = ns._chat_catalog(self.profile, include_unsupported=True)
-        return {(chat, item['path'].name): ns._digest(item['path'])
+        return {(chat, item['path'].relative_to(self.profile).as_posix()): ns._digest(item['path'])
                 for chat, entries in catalog.items() for item in entries}
 
     def _title_names(self):
@@ -92,6 +93,49 @@ class MockDirectReceiver:
         kinds = {thread: cosync_receive_plan.source_kind(entries) for thread, entries in incoming.items()}
         if 'unknown' in kinds.values():
             return False
+        chats = {thread: entries for thread, entries in incoming.items() if kinds[thread] == 'chat'}
+        subagents = {thread: entries for thread, entries in incoming.items() if kinds[thread] == 'subagent'}
+        # A single archived parent and its direct children can share one
+        # pre-group backup. Other groups remain pending until their complete
+        # transaction, including graph and report delivery, is supported.
+        if subagents and len(chats) == 1 and self.backup_root is not None:
+            parent = next(iter(chats))
+            local = ns._chat_catalog(self.profile, include_unsupported=True).get(parent, [])
+            direct = all(len(items) == 1 and items[0].get('parent_thread_id') == parent
+                         for items in subagents.values())
+            if local and direct:
+                if all(item['folder'] == 'archived_sessions' for item in local):
+                    mock_group_restore.restore(self.source, self.profile, self.shared, self.backup_root, self.key,
+                        parent, [(self.source_root, str(self.target))], self.codex, children=sorted(subagents),
+                        title=titles.get(parent), flatten_multi=len(chats[parent]) > 1)
+                    return True
+                # A folder may change after indexing and before the second
+                # Syncthing check. Revalidate the already applied group without
+                # replacing the only backup or silently accepting divergence.
+                catalog = ns._chat_catalog(self.profile, include_unsupported=True)
+                with tempfile.TemporaryDirectory(prefix='cosyncx-group-recheck-') as temp:
+                    for number, identity in enumerate([parent, *sorted(subagents)]):
+                        prepared = Path(temp).resolve() / str(number)
+                        mappings = [(self.source_root, str(self.target))]
+                        entries = incoming[identity]
+                        if len(entries) > 1:
+                            pages_import.prepare_flattened_mock(self.source, prepared, identity, mappings)
+                        else:
+                            pages_import.lineage.prepare_lineage(self.source, prepared, identity, mappings)
+                        if (prepared / 'cosyncx-path-report.json').exists():
+                            return False
+                        staged = ns._chat_catalog(prepared, include_unsupported=True).get(identity, [])
+                        current = catalog.get(identity, [])
+                        if len(staged) != 1 or len(current) != 1 or current[0]['folder'] != 'sessions':
+                            return False
+                        relation = ns._path_adjusted_relation(staged[0]['path'], current[0]['path'],
+                                                              str(self.target), str(self.target))
+                        if relation not in ('EQUIVALENT_AFTER_PATH_MAPPING', 'LOCAL_EXTENDS_AFTER_PATH_MAPPING'):
+                            return False
+                    for identity in [parent, *sorted(subagents)]:
+                        pages_import.index_thread(self.profile, self.shared, self.key, identity, self.codex,
+                                                  title=titles.get(identity))
+                return True
         # A subagent history can be a dependency of a visible conversation.
         # Do not claim a complete restore while that relationship is unsupported.
         if any(kinds[thread] == 'subagent' and kinds.get(entries[0].get('parent_thread_id')) == 'chat'

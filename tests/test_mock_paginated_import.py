@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock as unit_mock
 
@@ -54,6 +55,19 @@ class MockPaginatedImportTests(unittest.TestCase):
         expected = importer._expected_visible_messages(file)
         self.assertEqual(expected[importer._text_tag('local_image', path)], 1)
         self.assertEqual(expected[importer._text_tag('user', 'synthetic')], 1)
+
+    def test_unarchive_counts_as_a_change_even_if_history_bytes_are_identical(self):
+        archived = self.profile / 'archived_sessions' / self.first.name
+        archived.parent.mkdir()
+        shutil.copyfile(self.first, archived)
+        receiver = SimpleNamespace(profile=self.profile)
+        before = MockDirectReceiver._chat_digests(receiver)
+        active = self.profile / 'sessions' / self.first.name
+        active.parent.mkdir()
+        archived.rename(active)
+        after = MockDirectReceiver._chat_digests(receiver)
+        changed = {key[0] for key, digest in after.items() if before.get(key) != digest}
+        self.assertEqual(changed, {self.thread})
 
     def test_add_waits_if_unavailable_image_report_has_no_delivery(self):
         with self.last.open('a', encoding='utf-8') as out:

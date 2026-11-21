@@ -37,6 +37,11 @@ from the source are returned to the archive; incoming descendants and
 multi-page sources remain unsupported. On failure it attempts a mock-only
 rollback; if affected data no longer matches expected versions, it keeps an
 authenticated journal and blocks further backup rotation for review.
+The mock receiver can restore one archived parent and its previously active or
+missing direct children using one retained pre-group backup and per-step
+recovery journals. Incoming children already archived as descendants, multiple
+parent groups, nonempty relationship graphs, and path-report delivery still
+require a complete group implementation.
 The experimental `cosyncx prepare-lineage` command rewrites structured project
 paths and dependent byte offsets for a complete paginated thread into a new
 isolated directory. It does not import chats or rebuild the live Codex index.

@@ -22,7 +22,8 @@ import nexus_sync as ns
 
 def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: bytes,
             parent: str, mappings: list[tuple[str, str]], executable: Path, *, children: list[str],
-            parents: dict[str, str] | None = None) -> int:
+            parents: dict[str, str] | None = None, retain_journal: bool = False,
+            defer_rollback: bool = False) -> int:
     source = mock._mock_path(source)
     profile = mock._validate_profile(profile, key)
     shared, backup_root = mock._mock_path(shared), mock._mock_path(backup_root)
@@ -149,10 +150,11 @@ def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: b
                     data['verified_db_signatures'] = archive._db_signatures(profile, db_names)
                     archive._replace_journal(journal, data, key)
                 pages.index_thread(profile, shared, key, identity, executable, on_verified=mark_verified)
-            journal.unlink()
+            if not retain_journal:
+                journal.unlink()
             return len(children)
         except Exception as exc:
-            if not isinstance(exc, subprocess.SubprocessError):
+            if not defer_rollback and not isinstance(exc, subprocess.SubprocessError):
                 try:
                     rollback(profile, shared, backup_root, key)
                 except Exception:
