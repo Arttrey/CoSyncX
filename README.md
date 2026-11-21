@@ -42,6 +42,11 @@ Syncthing transfer is complete or that chats are indexed.
 threads and local history files before an unarchive operation. It is read-only;
 an actual restore would need to recheck and back up the full affected set while
 the profile is safely offline.
+`cosyncx active-titles --profile CODEX_HOME --output PRIVATE_DIR/session_index.jsonl`
+exports only titles whose threads are active and have session files. Run it
+again to refresh the export; the command does not install a scheduler or set up
+Syncthing. If an export fails, the command removes a previous export at that
+exact filename in a private directory so it is not silently kept stale.
 
 `cosyncx extensions export` can create a separately encrypted bundle of custom
 skills, hooks, rules, plugin files, `AGENTS.md` and `config.toml`. The config can

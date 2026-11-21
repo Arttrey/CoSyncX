@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -13,13 +14,13 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 import cosync_engine as engine
-import cosync_title_source
+import cosync_title_snapshot
 
 
 @unittest.skipUnless(os.environ.get('NEXUS_TEST_SYNCTHING') == '1' and shutil.which('syncthing'),
                      'requires isolated Syncthing')
 class TitleRelayTests(unittest.TestCase):
-    def test_direct_title_source_only_via_untrusted_relay(self):
+    def test_active_title_export_via_untrusted_relay(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-title-relay-') as tmp:
             root = Path(tmp).resolve()
             sockets = [socket.socket() for _ in range(6)]
@@ -32,12 +33,21 @@ class TitleRelayTests(unittest.TestCase):
             for directory in (source, relay, received): directory.mkdir()
             (source / 'sessions').mkdir()
             (source / 'auth.json').write_text('SYNTHETIC_SECRET_MUST_NOT_TRANSFER')
-            (source / 'sessions' / 'rollout.jsonl').write_text('SYNTHETIC_CHAT_MUST_NOT_TRANSFER')
             record = {'id': '019b0000-0000-7000-8000-000000000001', 'thread_name': 'synthetic private title',
                       'updated_at': '2026-01-01T00:00:00Z'}
+            archived = {'id': '019b0000-0000-7000-8000-000000000002', 'thread_name': 'synthetic archived title',
+                        'updated_at': '2026-01-01T00:00:00Z'}
+            for item in (record, archived):
+                (source / 'sessions' / f"rollout-2026-01-01T00-00-00-{item['id']}.jsonl").write_text('SYNTHETIC_CHAT_MUST_NOT_TRANSFER')
+            with sqlite3.connect(source / 'state_5.sqlite') as db:
+                db.execute('CREATE TABLE threads (id TEXT PRIMARY KEY, archived INTEGER)')
+                db.executemany('INSERT INTO threads VALUES (?,?)', [(record['id'], 0), (archived['id'], 1)])
             # Exercise a file spanning many encryption chunks, not just a tiny record.
             record['thread_name'] *= 1500
-            (source / 'session_index.jsonl').write_text(json.dumps(record) + '\n')
+            (source / 'session_index.jsonl').write_text(json.dumps(record) + '\n' + json.dumps(archived) + '\n')
+            export = root / 'active-titles'
+            export.mkdir(mode=0o700)
+            self.assertEqual(cosync_title_snapshot.write_active_titles(source, export / 'session_index.jsonl'), 1)
             homes = [root / 'sender-engine', root / 'relay-engine', root / 'receiver-engine']
             clients, processes, keys = [], [], []
             binary = Path(shutil.which('syncthing')).resolve(strict=True)
@@ -66,20 +76,12 @@ class TitleRelayTests(unittest.TestCase):
                     [{'deviceID': ids[1]}, {'deviceID': ids[0]}, {'deviceID': ids[2]}],
                     [{'deviceID': ids[2]}, {'deviceID': ids[1], 'encryptionPassword': password}],
                 ]
-                own = cosync_title_source.prepare(clients[0], source, 'mock-titles-encrypted')
-                cosync_title_source.verify(clients[0], source, 'mock-titles-encrypted', own)
-                for index, folder_path in enumerate((relay, received), start=1):
+                for index, folder_path in enumerate((export, relay, received)):
                     folder = clients[index]._get('config/defaults/folder')
                     folder.update({'id': 'mock-titles-encrypted', 'path': str(folder_path),
                                    'type': ('sendonly', 'receiveencrypted', 'receiveonly')[index],
                                    'devices': devices[index]})
                     clients[index]._post('config/folders', folder)
-                sender = clients[0]._get('config/folders/mock-titles-encrypted')
-                sender['devices'] = devices[0]
-                request = urllib.request.Request(f'http://127.0.0.1:{ports[0]}/rest/config/folders/mock-titles-encrypted',
-                    data=json.dumps(sender).encode(), method='PUT',
-                    headers={'X-API-Key': keys[0], 'Content-Type': 'application/json'})
-                with clients[0].opener.open(request, timeout=5): pass
                 deadline = time.monotonic() + 60
                 while time.monotonic() < deadline:
                     file = received / 'session_index.jsonl'
@@ -87,6 +89,7 @@ class TitleRelayTests(unittest.TestCase):
                     time.sleep(0.2)
                 else: self.fail('Encrypted synthetic title did not arrive through relay')
                 self.assertEqual(json.loads(file.read_text()), record)
+                self.assertNotIn('synthetic archived title', file.read_text())
                 relay_status = clients[1]._get('db/status?folder=mock-titles-encrypted')
                 self.assertEqual(relay_status.get('errors'), 0)
                 self.assertEqual({p.name for p in received.iterdir()} - {'.stfolder'}, {'session_index.jsonl'})
