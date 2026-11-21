@@ -28,9 +28,11 @@ history references its physical pages. A differing source history or title is
 applied after backing up the local state. Locally archived IDs stay archived;
 source archives are not transferred. Complete active relationship graphs are
 applied after indexing; missing-path reports remain unsupported.
-An indexed restore keeps its reload event until the status is published, but an
-interrupted write still requires manual recovery. The watcher is not installed
-or enabled automatically and must not be used on a real profile yet.
+An indexed restore keeps its reload event until the status is published. An
+interrupted write is retried only when the backup, databases, titles and
+affected histories still match the expected state; otherwise it waits for
+review. The watcher is not installed or enabled automatically and must not be
+used on a real profile yet.
 The mock pipeline can wait for histories, titles and relationship metadata as
 three independent folders. It defers any nonempty relationship graph until a
 complete, verified child-restore transaction is available.

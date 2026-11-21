@@ -186,6 +186,27 @@ class DirectRestoreTests(unittest.TestCase):
             with sqlite3.connect(profile / 'state_5.sqlite') as db:
                 db.execute('DELETE FROM threads WHERE id=?', (thread,))
             with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True), \
+                    patch('cosync_direct_restore.indexer._index_profile', side_effect=ns.SyncError('interrupted')):
+                with self.assertRaises(ns.SyncError):
+                    receiver._receive()
+            interrupted = profile / history.relative_to(source)
+            written = interrupted.read_bytes()
+            interrupted.write_bytes(written + b'local change')
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True):
+                self.assertIsNone(receiver._receive())
+            self.assertEqual(interrupted.read_bytes(), written + b'local change')
+            interrupted.write_bytes(written)
+            unrelated = '019b0000-0000-7000-8000-000000000099'
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                db.execute('INSERT INTO threads VALUES (?, 0)', (unrelated,))
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True):
+                self.assertIsNone(receiver._receive())
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                self.assertIsNotNone(db.execute('SELECT id FROM threads WHERE id=?', (unrelated,)).fetchone())
+            with sqlite3.connect(backups / 'latest' / 'state_5.sqlite') as saved:
+                with sqlite3.connect(profile / 'state_5.sqlite') as live:
+                    saved.backup(live)
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True), \
                     patch('cosync_direct_restore.indexer._index_profile') as indexed:
                 result = poll(4)
             self.assertEqual(result['state'], 'COMPLETE')
@@ -322,6 +343,10 @@ class DirectRestoreTests(unittest.TestCase):
             receiver = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
                 backup_root=backups, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
                 codex=Path(codex), folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0)
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True), \
+                    patch('cosync_direct_restore.indexer._index_profile', side_effect=ns.SyncError('interrupted')):
+                with self.assertRaises(ns.SyncError):
+                    receiver._receive()
             with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True):
                 self.assertEqual(receiver._receive(), 1)
             with sqlite3.connect(profile / 'state_5.sqlite') as db:

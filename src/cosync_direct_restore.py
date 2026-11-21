@@ -15,6 +15,7 @@ import stat
 import sys
 import tempfile
 import threading
+import shutil
 
 import cosync_auto_gate
 import cosync_engine
@@ -102,10 +103,102 @@ class DirectReceiver:
         (self.backup_root / 'direct-restore-pending.json').unlink()
         self.pending_result = None
 
+    def _recover_interrupted(self, record) -> bool:
+        """Undo file writes only if SQLite, titles and touched histories are unchanged."""
+        if record.get('phase') != 'writing' or not isinstance(record.get('operations'), list):
+            return False
+        operations = record['operations']
+        if not operations or any(not isinstance(item, dict) or set(item) != {'id', 'path', 'before', 'after'}
+                                 for item in operations):
+            return False
+        latest = self.backup_root / 'latest'
+        manifest_path = latest / 'manifest.json'
+        if (latest.is_symlink() or not latest.is_dir() or manifest_path.is_symlink() or not manifest_path.is_file()
+                or ns._digest(manifest_path) != record.get('backup_manifest_digest')):
+            return False
+        manifest = json.loads(manifest_path.read_bytes())
+        if not isinstance(manifest, dict) or manifest.get('version') != 1 or not isinstance(manifest.get('files'), dict):
+            return False
+        entries = manifest['files']
+        checked, names = [], set()
+        for item in operations:
+            name, before, after = item['path'], item['before'], item['after']
+            if (not graph_schema._uuid(item['id']) or not isinstance(name, str) or not name.startswith('sessions/')
+                    or '\\' in name or any(part in ('', '.', '..') for part in name.split('/'))
+                    or name in names or not isinstance(after, str) or len(after) != 64
+                    or (before is not None and (not isinstance(before, str) or len(before) != 64))):
+                return False
+            names.add(name)
+            path = self.profile
+            for part in name.split('/'):
+                path /= part
+                if path.is_symlink():
+                    return False
+            if path.exists() and not path.is_file():
+                return False
+            current = ns._digest(path) if path.is_file() else None
+            if current not in (before, after):
+                return False
+            saved = None
+            if before is not None:
+                try:
+                    saved = backup._resolve_file(latest, name)
+                except backup.BackupError:
+                    return False
+                if entries.get(name) != before or ns._digest(saved) != before:
+                    return False
+            checked.append((path, saved, before, current))
+        db_names = {name for name in entries if name.startswith(('state_', 'thread_history_')) and name.endswith('.sqlite')}
+        live_names = {p.name for pattern in ('state_*.sqlite', 'thread_history_*.sqlite') for p in self.profile.glob(pattern)}
+        if 'state_5.sqlite' not in db_names or db_names != live_names:
+            return False
+        title = self.profile / 'session_index.jsonl'
+        expected_title = entries.get('session_index.jsonl')
+        if (title.is_symlink() or (title.exists() and not title.is_file())
+                or title.is_file() != (expected_title is not None)
+                or (title.is_file() and ns._digest(title) != expected_title)):
+            return False
+        with locking._mock_thread_lock(self.profile, operations[0]['id']):
+            if not quiescence.is_quiet():
+                return False
+            with tempfile.TemporaryDirectory(prefix='cosyncx-db-check-') as tmp:
+                for name in db_names:
+                    live = self.profile / name
+                    try:
+                        saved = backup._resolve_file(latest, name)
+                        if live.is_symlink() or not live.is_file() or ns._digest(saved) != entries[name]:
+                            return False
+                        with sqlite3.connect(live.as_uri() + '?mode=ro', uri=True) as src:
+                            with sqlite3.connect(Path(tmp) / name) as dst:
+                                src.backup(dst)
+                        if ns._digest(Path(tmp) / name) != entries[name]:
+                            return False
+                    except (backup.BackupError, sqlite3.Error, OSError):
+                        return False
+            for path, saved, before, current in checked:
+                if path.is_symlink() or (ns._digest(path) if path.is_file() else None) != current:
+                    return False
+                if saved is None and current is not None:
+                    path.unlink()
+                elif saved is not None and current != before:
+                    temporary = path.with_name('.cosyncx-recover-' + os.urandom(12).hex())
+                    try:
+                        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+                        with os.fdopen(fd, 'wb') as out, saved.open('rb') as src:
+                            shutil.copyfileobj(src, out, 1024 * 1024)
+                            out.flush(); os.fsync(out.fileno())
+                        if ns._digest(temporary) != before or ns._digest(saved) != before:
+                            raise ns.SyncError('Direct backup changed during recovery')
+                        os.replace(temporary, path)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+            (self.backup_root / 'direct-restore-pending.json').unlink()
+        return True
+
     def _receive(self) -> int | None:
         journal = self.backup_root / 'direct-restore-pending.json'
         prior = self._read_journal() if journal.exists() or journal.is_symlink() else None
-        if (journal.exists() or journal.is_symlink()) and (not prior or prior.get('phase') != 'indexed'):
+        if (journal.exists() or journal.is_symlink()) and not prior:
             return None
         try:
             mock_journal.ensure_clear(self.backup_root)
@@ -115,6 +208,12 @@ class DirectReceiver:
             if not quiescence.is_quiet():
                 return None
         except quiescence.QuiescenceError:
+            return None
+        if prior is not None and prior.get('phase') == 'writing':
+            if not self._recover_interrupted(prior):
+                return None
+            prior = None
+        if prior is not None and prior.get('phase') != 'indexed':
             return None
         graph_file = self.graph / 'graph.json'
         if graph_file.is_symlink() or not graph_file.is_file() or graph_file.stat().st_size > 32 * 1024 * 1024:
@@ -311,6 +410,13 @@ class DirectReceiver:
                     return None
             if not prepared and not recheck and not graph_changed:
                 return 0
+            if graph_changed and not prepared and not recheck:
+                identity = sorted(graph_changed)[0]
+                current = local.get(identity, [])
+                if len(current) != 1 or current[0]['folder'] != 'sessions':
+                    return None
+                title = names.get(identity) if kinds[identity] == 'chat' else None
+                recheck.append((identity, current[0]['path'], title, ns._digest(current[0]['path']), None, False))
             prepared.sort(key=lambda entry: (depth[entry[0]], entry[0]))
             db_paths = {p for pattern in ('state_*.sqlite', 'thread_history_*.sqlite')
                         for p in self.profile.glob(pattern)}
@@ -357,7 +463,13 @@ class DirectReceiver:
                 changed = sorted(set([identity for identity, _, _, _ in prepared] +
                            [identity for identity, _, _, _, replacement, title_changed in recheck
                             if replacement is not None or title_changed]) | graph_changed)
+                operations = [{'id': identity, 'path': relative.as_posix(), 'before': None, 'after': ns._digest(staged)}
+                              for identity, staged, relative, _ in prepared]
+                operations += [{'id': identity, 'path': path.relative_to(self.profile).as_posix(),
+                                'before': digest, 'after': ns._digest(replacement) if replacement else digest}
+                               for identity, path, _, digest, replacement, _ in recheck]
                 record = {'version': 1, 'phase': 'writing', 'event_id': os.urandom(16).hex(),
+                          'operations': operations,
                           'threads': changed,
                           'paths': ([relative.as_posix() for _, _, relative, _ in prepared] +
                                     [path.relative_to(self.profile).as_posix() for _, path, _, _, replacement, _ in recheck
