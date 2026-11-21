@@ -305,7 +305,8 @@ class DirectReceiver:
                 or any(not isinstance(op, dict) or op.get('before') is None or op.get('before') != op.get('after')
                        for op in operations)
                 or not isinstance(verified, dict) or not isinstance(snapshot, dict)
-                or snapshot.get('edges') != []):
+                or not isinstance(snapshot.get('edges'), list)
+                or (snapshot['edges'] and record.get('phase') != 'indexed')):
             return False
         manifest = self.backup_root / 'latest' / 'manifest.json'
         if (manifest.is_symlink() or not manifest.is_file()
@@ -322,6 +323,11 @@ class DirectReceiver:
                       if title_data is not None else {})
             with closing(sqlite3.connect((self.profile / 'state_5.sqlite').as_uri() + '?mode=ro', uri=True)) as db:
                 rows = {row[0]: row[1:] for row in db.execute('SELECT id, rollout_path, title, archived FROM threads')}
+                for edge in snapshot['edges']:
+                    if (not isinstance(edge, dict) or set(edge) != {'parent', 'child', 'status'}
+                            or db.execute('SELECT parent_thread_id, status FROM thread_spawn_edges WHERE child_thread_id=?',
+                                          (edge['child'],)).fetchone() != (edge['parent'], edge['status'])):
+                        return False
             with closing(sqlite3.connect((self.profile / 'thread_history_1.sqlite').as_uri() + '?mode=ro', uri=True)) as db:
                 projected = {row[0] for row in db.execute('SELECT thread_id FROM thread_history_projection_state')}
             reusable = {}

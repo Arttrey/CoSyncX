@@ -161,6 +161,8 @@ class DirectMessagePolicyTests(unittest.TestCase):
             with sqlite3.connect(profile / 'state_5.sqlite') as db:
                 db.execute('CREATE TABLE threads (id TEXT, rollout_path TEXT, title TEXT, archived INTEGER)')
                 db.execute('INSERT INTO threads VALUES (?,?,?,0)', (identity, str(history), 'name'))
+                db.execute('CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT, status TEXT)')
+                db.execute('INSERT INTO thread_spawn_edges VALUES (?,?,?)', (identity, 'child', 'closed'))
             with sqlite3.connect(profile / 'thread_history_1.sqlite') as db:
                 db.execute('CREATE TABLE thread_history_projection_state (thread_id TEXT)')
                 db.execute('INSERT INTO thread_history_projection_state VALUES (?)', (identity,))
@@ -178,12 +180,22 @@ class DirectMessagePolicyTests(unittest.TestCase):
                  patch.object(receiver, '_read_journal', return_value=record):
                 changed = {**record, 'threads': [identity]}
                 self.assertFalse(receiver._retire_unchanged_indexing(changed, journal))
+                with_graph = {**record, 'index_snapshot': {'edges': [
+                    {'parent':identity, 'child':'child', 'status':'closed'}]}}
+                self.assertFalse(receiver._retire_unchanged_indexing(with_graph, journal))
+                bad_graph = {**with_graph, 'phase':'indexed', 'index_snapshot': {'edges': [
+                    {'parent':identity, 'child':'child', 'status':'open'}]}}
+                self.assertFalse(receiver._retire_unchanged_indexing(bad_graph, journal))
                 self.assertTrue(journal.exists())
                 self.assertTrue(receiver._retire_unchanged_indexing(record, journal))
                 journal.write_text('journal')
                 indexed = {**record, 'phase': 'indexed'}
                 receiver._read_journal.return_value = indexed
                 self.assertTrue(receiver._retire_unchanged_indexing(indexed, journal))
+                journal.write_text('journal')
+                indexed_graph = {**with_graph, 'phase':'indexed'}
+                receiver._read_journal.return_value = indexed_graph
+                self.assertTrue(receiver._retire_unchanged_indexing(indexed_graph, journal))
                 self.assertEqual(receiver._read_carry(), carry)
             self.assertFalse(journal.exists())
             self.assertEqual(receiver.verified[identity], (digest, 'name'))
