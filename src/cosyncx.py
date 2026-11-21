@@ -11,6 +11,7 @@ import cosync_receive_plan
 import cosync_graph_snapshot
 import cosync_archive_plan
 import cosync_title_snapshot
+import cosync_direct_restore
 
 
 def main(argv=None) -> int:
@@ -33,6 +34,8 @@ def main(argv=None) -> int:
         return cosync_archive_plan.main(arguments[1:])
     if arguments and arguments[0] == 'active-titles':
         return cosync_title_snapshot.main(arguments[1:])
+    if arguments and arguments[0] == 'direct-watch':
+        return cosync_direct_restore.main(arguments[1:])
     return nexus_sync.main(arguments)
 
 

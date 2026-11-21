@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from cosync_direct_restore import DirectReceiver
+from cosync_restore_supervisor import RestoreSupervisor
 from test_codex_contract import read_rpc_response, stop_server
 
 
@@ -73,7 +74,41 @@ class DirectRestoreTests(unittest.TestCase):
             indexed.assert_called_once()
             self.assertTrue((profile / history.relative_to(source)).is_file())
             self.assertTrue((backups / 'latest' / 'state_5.sqlite').is_file())
-            self.assertFalse((backups / 'direct-restore-pending.json').exists())
+            journal = backups / 'direct-restore-pending.json'
+            self.assertTrue(journal.exists())
+            # Restart before Cursor receives the event: use the same event ID
+            # after rechecking the source and index rather than losing it.
+            restarted = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
+                backup_root=backups, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
+                codex=Path(sys.executable), folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0)
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True), \
+                    patch('cosync_direct_restore.indexer._index_profile') as rechecked:
+                self.assertEqual(restarted.poll(readers[0], title_status_reader=readers[1],
+                    graph_status_reader=readers[2], now=5)['state'], 'WAITING')
+                saved_backup = backups / 'latest' / 'state_5.sqlite'
+                original_backup = saved_backup.read_bytes()
+                saved_backup.write_bytes(original_backup + b'changed')
+                self.assertEqual(restarted.poll(readers[0], title_status_reader=readers[1],
+                    graph_status_reader=readers[2], now=6)['state'], 'PENDING')
+                saved_backup.write_bytes(original_backup)
+                original_history = history.read_bytes()
+                history.write_bytes(original_history + b'changed')
+                self.assertEqual(restarted.poll(readers[0], title_status_reader=readers[1],
+                    graph_status_reader=readers[2], now=7)['state'], 'PENDING')
+                history.write_bytes(original_history)
+                repeated = restarted.poll(readers[0], title_status_reader=readers[1],
+                    graph_status_reader=readers[2], now=8)
+            self.assertEqual(repeated['restore_event']['id'], result['restore_event']['id'])
+            rechecked.assert_called_once()
+            status_path = root / 'restore-status.json'
+            supervisor = RestoreSupervisor(restarted, readers[0], status_path, mock_only=False,
+                                           title_reader=readers[1], graph_reader=readers[2])
+            with patch('cosync_restore_status.write_status', side_effect=OSError('synthetic write failure')):
+                self.assertEqual(supervisor.tick()['state'], 'ERROR')
+            self.assertTrue(journal.exists())
+            self.assertEqual(supervisor.tick()['state'], 'COMPLETE')
+            self.assertEqual(json.loads(status_path.read_text())['restore_event']['id'], result['restore_event']['id'])
+            self.assertFalse(journal.exists())
 
     @unittest.skipUnless(os.environ.get('NEXUS_TEST_CODEX') == '1' and shutil.which('codex'), 'requires disposable Codex')
     def test_real_codex_indexes_new_direct_chat_in_disposable_profile(self):
@@ -124,7 +159,7 @@ class DirectRestoreTests(unittest.TestCase):
             with sqlite3.connect(profile / 'state_5.sqlite') as db:
                 row = db.execute('SELECT archived FROM threads WHERE id=?', (thread,)).fetchone()
             self.assertEqual(row, (0,))
-            self.assertFalse((backups / 'direct-restore-pending.json').exists())
+            self.assertTrue((backups / 'direct-restore-pending.json').is_file())
 
 
 if __name__ == '__main__':
