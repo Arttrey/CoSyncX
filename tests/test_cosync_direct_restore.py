@@ -43,6 +43,15 @@ class DirectRestoreTests(unittest.TestCase):
             new_record = json.loads(record('/source/Nexus'))
             new_record['payload']['id'] = new_thread
             new_file.write_text(json.dumps(new_record) + '\n')
+            child_thread = '019b0000-0000-7000-8000-000000000023'
+            child_record = json.loads(record('/source/Nexus'))
+            child_record['payload'].update({'id': child_thread, 'source': {'subagent': {'other': 'guardian'}},
+                                            'parent_thread_id': thread})
+            child_file = active / f'rollout-2026-01-01T00-00-00-{child_thread}.jsonl'
+            child_file.write_text(json.dumps(child_record) + '\n')
+            (graph / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1',
+                'edges': [{'parent': thread, 'child': child_thread, 'status': 'closed'}],
+                'omitted_missing': 0, 'omitted_archived': 0}))
             with (titles / 'session_index.jsonl').open('a') as stream:
                 stream.write(json.dumps({'id': new_thread, 'thread_name': 'new'}) + '\n')
             with sqlite3.connect(profile / 'state_5.sqlite') as db:
@@ -59,6 +68,7 @@ class DirectRestoreTests(unittest.TestCase):
             self.assertEqual(archived_file.read_bytes(), before)
             self.assertTrue((profile / 'sessions' / new_file.name).is_file())
             self.assertFalse((profile / 'sessions' / filename).exists())
+            self.assertFalse((profile / 'sessions' / child_file.name).exists())
 
     def test_waits_for_syncthing_and_idle_profile_then_imports_and_confirms_index(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-direct-real-test-') as tmp:
@@ -280,6 +290,38 @@ class DirectRestoreTests(unittest.TestCase):
                 self.assertEqual(updated._receive(), 1)
             self.assertIn(b'later source message', target.read_bytes())
             self.assertEqual((backups / 'latest' / target.relative_to(profile)).read_bytes(), divergent_local)
+            updated_record = json.loads(journal.read_text())
+            updated.acknowledge({'id': updated_record['event_id'], 'indexed': True, 'changed_chats': 1})
+            child = '019b0000-0000-7000-8000-000000000012'
+            child_path = folder / f'rollout-2026-01-01T00-00-00-{child}.jsonl'
+            child_meta = dict(meta, id=child, source={'subagent': {'other': 'guardian'}}, parent_thread_id=thread)
+            child_rows = [{'timestamp': '2026-01-01T00:00:00.000Z', 'type': 'session_meta', 'payload': child_meta},
+                {'timestamp': '2026-01-01T00:00:01.000Z', 'type': 'response_item', 'payload':
+                 {'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': 'child answer'}]}},
+                {'timestamp': '2026-01-01T00:00:01.001Z', 'type': 'event_msg', 'payload':
+                 {'type': 'agent_message', 'message': 'child answer'}}]
+            child_home = root / 'child-build'
+            (child_home / 'sessions').mkdir(parents=True)
+            child_build = child_home / 'sessions' / child_path.name
+            child_build.write_text(''.join(json.dumps(row) + '\n' for row in child_rows))
+            migrated = subprocess.run([codex, 'migrate-rollouts', '--apply', '--json'],
+                env={**os.environ, 'CODEX_HOME': str(child_home)}, capture_output=True, timeout=30)
+            self.assertEqual(migrated.returncode, 0, migrated.stderr.decode(errors='replace'))
+            child_rows = [json.loads(line) for line in child_build.read_text().splitlines()]
+            child_rows[0]['payload']['subagent_history_start_ordinal'] = next(
+                row['ordinal'] for row in child_rows if row['type'] == 'response_item')
+            child_path.write_text(''.join(json.dumps(row) + '\n' for row in child_rows))
+            (graph / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1',
+                'edges': [{'parent': thread, 'child': child, 'status': 'closed'}],
+                'omitted_missing': 0, 'omitted_archived': 0}))
+            with_graph = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
+                backup_root=backups, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
+                codex=Path(codex), folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0)
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True):
+                self.assertEqual(with_graph._receive(), 2)
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                self.assertEqual(db.execute('SELECT parent_thread_id, status FROM thread_spawn_edges WHERE child_thread_id=?',
+                                            (child,)).fetchone(), (thread, 'closed'))
 
 
 if __name__ == '__main__':

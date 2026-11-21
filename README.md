@@ -25,8 +25,9 @@ and reports Syncthing transfer progress, not successful restoration.
 The `direct-watch --experimental` prototype handles single-page new and active
 chats when Cursor and Codex are quiet. A differing source history or title is
 applied after backing up the local state. Locally archived IDs stay archived;
-source archives are not transferred. Nonempty relationship graphs, multi-page
-histories and missing-path reports remain unsupported.
+source archives are not transferred. Complete active relationship graphs are
+applied after indexing; multi-page histories and missing-path reports remain
+unsupported.
 An indexed restore keeps its reload event until the status is published, but an
 interrupted write still requires manual recovery. The watcher is not installed
 or enabled automatically and must not be used on a real profile yet.

@@ -18,6 +18,7 @@ import threading
 
 import cosync_auto_gate
 import cosync_engine
+import cosync_graph_snapshot as graph_schema
 import cosync_lineage as lineage
 import cosync_quiescence as quiescence
 import cosync_receive_plan
@@ -25,6 +26,8 @@ import cosync_restore_backup as backup
 import cosync_restore_supervisor
 import cosync_syncthing_watch
 import mock_chat_sync as locking
+import mock_graph_restore
+import mock_journal
 import mock_paginated_import as indexer
 import nexus_sync as ns
 
@@ -99,6 +102,10 @@ class DirectReceiver:
         if (journal.exists() or journal.is_symlink()) and (not prior or prior.get('phase') != 'indexed'):
             return None
         try:
+            mock_journal.ensure_clear(self.backup_root)
+        except ns.SyncError:
+            return None
+        try:
             if not quiescence.is_quiet():
                 return None
         except quiescence.QuiescenceError:
@@ -111,7 +118,7 @@ class DirectReceiver:
             return None
         graph = json.loads(graph_bytes)
         if (not isinstance(graph, dict) or graph.get('format') != 'cosyncx-active-graph-v1'
-                or graph.get('edges') != [] or type(graph.get('omitted_missing')) is not int
+                or not isinstance(graph.get('edges'), list) or type(graph.get('omitted_missing')) is not int
                 or graph['omitted_missing'] != 0 or type(graph.get('omitted_archived')) is not int
                 or graph['omitted_archived'] < 0):
             return None
@@ -140,6 +147,19 @@ class DirectReceiver:
             skipped.update(dependent)
         incoming = {identity: entries for identity, entries in incoming.items() if identity not in skipped}
         kinds = {identity: cosync_receive_plan.source_kind(entries) for identity, entries in incoming.items()}
+        edges, seen_children = [], set()
+        for edge in graph['edges']:
+            if (not isinstance(edge, dict) or set(edge) != {'parent', 'child', 'status'}
+                    or not graph_schema._uuid(edge['parent']) or not graph_schema._uuid(edge['child'])
+                    or edge['parent'] == edge['child'] or edge['child'] in seen_children
+                    or edge['status'] not in ('open', 'closed')):
+                return None
+            seen_children.add(edge['child'])
+            if edge['parent'] in skipped or edge['child'] in skipped:
+                continue
+            if edge['parent'] not in incoming or edge['child'] not in incoming:
+                return None
+            edges.append(edge)
         for identity, entries in incoming.items():
             if (kinds[identity] == 'subagent' and
                     kinds.get(entries[0].get('parent_thread_id')) != 'chat'):
@@ -185,6 +205,13 @@ class DirectReceiver:
                 indexer._index_profile(self.profile, identity, self.codex, title=item['title'])
                 item['digest'] = ns._digest(current[0]['path'])
                 self.verified[identity] = (item['digest'], item['title'])
+            if edges:
+                with sqlite3.connect((self.profile / 'state_5.sqlite').as_uri() + '?mode=ro', uri=True) as db:
+                    for edge in edges:
+                        actual = db.execute('SELECT parent_thread_id, status FROM thread_spawn_edges WHERE child_thread_id=?',
+                                            (edge['child'],)).fetchone()
+                        if actual != (edge['parent'], edge['status']):
+                            return None
             self._write_journal(prior)
             return len(prior['threads'])
         with tempfile.TemporaryDirectory(prefix='cosyncx-direct-prepare-') as temp:
@@ -222,7 +249,21 @@ class DirectReceiver:
                 relative = staged[0]['path'].relative_to(stage)
                 prepared.append((identity, staged[0]['path'], relative,
                                  names.get(identity) if kinds[identity] == 'chat' else None))
-            if not prepared and not recheck:
+            graph_changed = set()
+            if edges:
+                try:
+                    with sqlite3.connect((self.profile / 'state_5.sqlite').as_uri() + '?mode=ro', uri=True) as db:
+                        columns = {row[1] for row in db.execute('PRAGMA table_info(thread_spawn_edges)')}
+                        if columns != {'parent_thread_id', 'child_thread_id', 'status'}:
+                            return None
+                        for edge in edges:
+                            actual = db.execute('SELECT parent_thread_id, status FROM thread_spawn_edges WHERE child_thread_id=?',
+                                                (edge['child'],)).fetchone()
+                            if actual != (edge['parent'], edge['status']):
+                                graph_changed.add(edge['parent'])
+                except sqlite3.Error:
+                    return None
+            if not prepared and not recheck and not graph_changed:
                 return 0
             prepared.sort(key=lambda entry: (kinds[entry[0]] != 'chat', entry[0]))
             db_paths = {p for pattern in ('state_*.sqlite', 'thread_history_*.sqlite')
@@ -246,7 +287,7 @@ class DirectReceiver:
                 return None
             selection = dbs + ([index.name] if index.is_file() else [])
             selection += [path.relative_to(self.profile).as_posix() for _, path, _, _, _, _ in recheck]
-            lock_id = prepared[0][0] if prepared else recheck[0][0]
+            lock_id = prepared[0][0] if prepared else (recheck[0][0] if recheck else sorted(graph_changed)[0])
             with locking._mock_thread_lock(self.profile, lock_id):
                 if not quiescence.is_quiet():
                     return None
@@ -267,9 +308,9 @@ class DirectReceiver:
                         if ns._digest(path) != digest or manifest.get(relative) != digest:
                             raise ns.SyncError('Direct history changed during backup')
                 latest = backup.replace_latest(self.profile, self.backup_root, selection, pre_commit=verify_backup)
-                changed = ([identity for identity, _, _, _ in prepared] +
+                changed = sorted(set([identity for identity, _, _, _ in prepared] +
                            [identity for identity, _, _, _, replacement, title_changed in recheck
-                            if replacement is not None or title_changed])
+                            if replacement is not None or title_changed]) | graph_changed)
                 record = {'version': 1, 'phase': 'writing', 'event_id': os.urandom(16).hex(),
                           'threads': changed,
                           'paths': ([relative.as_posix() for _, _, relative, _ in prepared] +
@@ -330,6 +371,12 @@ class DirectReceiver:
                     raise ns.SyncError('Direct indexed history unavailable')
                 self.verified[identity] = (ns._digest(current[0]['path']), title)
                 verified[identity] = {'digest': self.verified[identity][0], 'title': title}
+            if edges:
+                if not quiescence.is_quiet():
+                    raise ns.SyncError('Codex started during direct restore')
+                filtered = Path(temp).resolve() / 'filtered-graph.json'
+                filtered.write_text(json.dumps({**graph, 'edges': edges}), encoding='utf-8')
+                mock_graph_restore._apply_graph(self.profile, self.backup_root, filtered, use_existing_backup=True)
             record['verified'] = verified
             record['phase'] = 'indexed'
             self._write_journal(record)

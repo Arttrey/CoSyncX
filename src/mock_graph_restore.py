@@ -21,6 +21,11 @@ def apply_graph(profile: Path, shared: Path, backup_root: Path, graph_file: Path
                    for a, b in ((profile, shared), (profile, backup_root), (shared, backup_root)))):
         raise ns.SyncError('Invalid mock graph paths')
     mock_journal.ensure_clear(backup_root)
+    return _apply_graph(profile, backup_root, graph_file, use_existing_backup=use_existing_backup)
+
+
+def _apply_graph(profile: Path, backup_root: Path, graph_file: Path, *, use_existing_backup: bool = False) -> int:
+    """Apply validated links after the caller has guarded and backed up the profile."""
     before = graph_file.stat()
     raw = graph_file.read_bytes()
     after = graph_file.stat()
