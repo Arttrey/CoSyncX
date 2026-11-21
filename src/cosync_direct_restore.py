@@ -65,6 +65,7 @@ class DirectReceiver:
                                                      quiet_seconds=quiet_seconds)
         self.verified = {}
         self.pending_result = None
+        self.unresolved_archived_count = 0
         self.path_warning_count = 0
         report = self.backup_root / 'missing-paths.json'
         if report.is_file() and not report.is_symlink():
@@ -396,6 +397,7 @@ class DirectReceiver:
         incoming = ns._chat_catalog(self.source, include_unsupported=True)
         all_incoming = dict(incoming)
         local = ns._chat_catalog(self.profile, include_unsupported=True)
+        source_kinds = {identity: cosync_receive_plan.source_kind(entries) for identity, entries in incoming.items()}
         # A locally archived conversation stays archived even when the source
         # has an active copy. It and its dependent children must not block
         # unrelated active chats from being imported.
@@ -422,7 +424,8 @@ class DirectReceiver:
             except sqlite3.Error:
                 return None
             skipped.update(set(incoming) & archived_ids)
-        source_kinds = {identity: cosync_receive_plan.source_kind(entries) for identity, entries in incoming.items()}
+        self.unresolved_archived_count = sum(identity in skipped and identity not in self.excluded_thread_ids
+                                             and source_kinds[identity] == 'chat' for identity in incoming)
         for identity, entries in incoming.items():
             if source_kinds[identity] == 'subagent' and entries[0].get('parent_thread_id') not in incoming:
                 skipped.add(identity)
@@ -814,7 +817,8 @@ class DirectReceiver:
         observations = observe()
         revision = self.gate.observe(observations, now=now)
         if revision is None:
-            return {'state': 'CURRENT' if self.gate.is_current(now=now) else 'WAITING', 'mock_only': False}
+            state = ('PENDING' if self.unresolved_archived_count else 'CURRENT') if self.gate.is_current(now=now) else 'WAITING'
+            return {'state': state, 'mock_only': False}
         if on_restore is not None:
             on_restore()
         count = self._receive()
@@ -833,6 +837,8 @@ class DirectReceiver:
             if not carry and (not record or record.get('phase') != 'indexed'):
                 raise ns.SyncError('Direct restore confirmation unavailable')
             event['id'] = carry[0]['id'] if carry else record['event_id']
+        if event is None and self.unresolved_archived_count:
+            return {'state': 'PENDING', 'mock_only': False}
         result = {'state': 'COMPLETE', 'mock_only': False, 'restore_event': event}
         if carry or (record and record.get('phase') == 'indexed'):
             result['acknowledge_required'] = True

@@ -16,6 +16,43 @@ from test_codex_contract import read_rpc_response, stop_server
 
 
 class DirectRestoreTests(unittest.TestCase):
+    def test_active_source_archived_locally_does_not_report_complete(self):
+        with tempfile.TemporaryDirectory(prefix='cosyncx-pending-archived-') as tmp:
+            root = Path(tmp).resolve()
+            source, titles, graph, profile, backups, project = (root / name for name in
+                ('source', 'titles', 'graph', 'profile', 'backups', 'project'))
+            for path in (source, titles, graph, profile, backups, project): path.mkdir(mode=0o700)
+            incoming, archived = source / 'sessions', profile / 'archived_sessions'
+            incoming.mkdir(); archived.mkdir()
+            identity = '019b0000-0000-7000-8000-0000000000c1'
+            meta = {'id': identity, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': '/source/Nexus',
+                    'originator': 'codex_vscode', 'cli_version': '0.1.0', 'source': 'vscode',
+                    'model_provider': 'openai', 'history_mode': 'paginated'}
+            name = f'rollout-2026-01-01T00-00-00-{identity}.jsonl'
+            raw = json.dumps({'timestamp': meta['timestamp'], 'type': 'session_meta', 'payload': meta, 'ordinal': 0}) + '\n'
+            (incoming / name).write_text(raw); (archived / name).write_text(raw)
+            (titles / 'session_index.jsonl').write_text(json.dumps({'id': identity, 'thread_name': 'test'}) + '\n')
+            (graph / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1', 'edges': [],
+                'omitted_missing': 0, 'omitted_archived': 0}))
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                db.execute('CREATE TABLE threads (id TEXT, archived INTEGER)')
+                db.execute('INSERT INTO threads VALUES (?, 1)', (identity,))
+            receiver = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
+                backup_root=backups, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
+                codex=Path(sys.executable), folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0)
+            status = {'state': 'idle', 'sequence': 1, 'remoteSequence': {'vps': 1}, 'needFiles': 0,
+                      'needDirectories': 0, 'needSymlinks': 0, 'needDeletes': 0, 'errors': 0, 'pullErrors': 0}
+            def read(folder): return lambda: (folder, status, True, 'valid')
+            readers = [read(folder) for folder in ('sessions', 'titles', 'graph')]
+            self.assertEqual(receiver.poll(readers[0], title_status_reader=readers[1],
+                                           graph_status_reader=readers[2], now=0)['state'], 'WAITING')
+            self.assertEqual(receiver.poll(readers[0], title_status_reader=readers[1],
+                                           graph_status_reader=readers[2], now=1)['state'], 'PENDING')
+            self.assertEqual(receiver.poll(readers[0], title_status_reader=readers[1],
+                                           graph_status_reader=readers[2], now=2)['state'], 'PENDING')
+            self.assertEqual((archived / name).read_text(), raw)
+            self.assertFalse((backups / 'latest').exists())
+
     def test_cursor_start_during_batch_stops_and_recovers(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-cursor-start-') as tmp:
             root = Path(tmp).resolve()
