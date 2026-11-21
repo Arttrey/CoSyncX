@@ -16,6 +16,7 @@ import threading
 import time
 
 import cosync_lineage as lineage
+import cosync_receive_plan
 import cosync_restore_backup as backup
 import mock_chat_sync as mock
 import nexus_sync as ns
@@ -25,17 +26,31 @@ def _text_tag(role: str, text: str) -> str:
     return role + ':' + hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 
-def _expected_visible_messages(path: Path) -> Counter:
+def _expected_visible_messages(path: Path, *, subagent: bool = False) -> Counter:
     """Compare message hashes, never print or persist the message text."""
     responses, events, completed = Counter(), Counter(), Counter()
+    start_ordinal = None
     with path.open('rb') as stream:
-        for line in stream:
+        number = -1
+        while line := stream.readline(ns.MAX_CHAT_BYTES + 1):
+            number += 1
+            if len(line) > ns.MAX_CHAT_BYTES:
+                raise ns.SyncError('Mock record is too large')
             if not line.endswith(b'\n'):
                 raise ns.SyncError('Incomplete mock record')
             row = json.loads(line)
             payload = row.get('payload') if isinstance(row, dict) else None
             if not isinstance(payload, dict):
                 continue
+            if number == 0 and subagent:
+                start_ordinal = payload.get('subagent_history_start_ordinal')
+                if type(start_ordinal) is not int or start_ordinal < 0:
+                    raise ns.SyncError('Mock subagent history boundary is unavailable')
+            if subagent and number > 0:
+                if type(row.get('ordinal')) is not int:
+                    raise ns.SyncError('Mock subagent ordinal is unavailable')
+                if row['ordinal'] < start_ordinal:
+                    continue
             kind = payload.get('type')
             if row.get('type') == 'response_item' and kind == 'message' and payload.get('role') == 'user':
                 parts = payload.get('content')
@@ -104,7 +119,7 @@ def _expected_visible_messages(path: Path) -> Counter:
         has_completed_user = any(key.startswith('user:') for key in completed)
         if completed_role or (role == 'image' and has_completed_user):
             expected.update(completed_role | event_role)
-        else:
+        elif not (subagent and role in ('user', 'image')):
             expected.update(completed_role | event_role | response_role)
     return expected
 
@@ -144,52 +159,51 @@ def prepare_flattened_mock(source: Path, destination: Path, thread_id: str,
             if isinstance(value, list):
                 return any(nested_ordinal(child) for child in value)
             return False
-        records = []
-        leaf_meta = None
-        last_ordinal = -1
-        for index, page in enumerate(chain):
-            path = pages[page]['path']
-            limit = (pages[chain[index + 1]]['history_base']['end_byte_offset']
-                     if index + 1 < len(chain) else path.stat().st_size)
-            position = 0
-            with path.open('rb') as stream:
-                for number, line in enumerate(stream):
-                    position += len(line)
-                    if position > limit:
-                        break
-                    if not line.endswith(b'\n'):
-                        raise ns.SyncError('Incomplete mock page')
-                    row = json.loads(line)
-                    if not isinstance(row, dict) or type(row.get('ordinal')) is not int or row['ordinal'] <= last_ordinal:
-                        raise ns.SyncError('Mock ordinals are ambiguous')
-                    last_ordinal = row['ordinal']
-                    if number == 0:
-                        if page == chain[-1]:
-                            leaf_meta = row
-                        continue
-                    if nested_ordinal(row.get('payload')):
-                        raise ns.SyncError('Nested ordinal is unsupported')
-                    records.append(row)
-            if position < limit:
-                raise ns.SyncError('Incomplete mock page prefix')
+        with pages[chain[-1]]['path'].open('rb') as stream:
+            header = stream.readline(ns.MAX_CHAT_BYTES + 1)
+        if len(header) > ns.MAX_CHAT_BYTES or not header.endswith(b'\n'):
+            raise ns.SyncError('Invalid mock session metadata')
+        leaf_meta = json.loads(header)
         if not isinstance(leaf_meta, dict) or not isinstance(leaf_meta.get('payload'), dict):
             raise ns.SyncError('Invalid mock session metadata')
         leaf_meta['payload'].pop('history_base', None)
-        output = [leaf_meta, *records]
-        for ordinal, row in enumerate(output):
-            row['ordinal'] = ordinal
+        leaf_meta['ordinal'] = 0
         root_path = pages[chain[0]]['path'].relative_to(prepared)
         with tempfile.TemporaryDirectory(prefix='cosyncx-flat-output-', dir=destination.parent) as staged:
             staged = Path(staged)
             path = staged / root_path
             path.parent.mkdir(mode=0o700, parents=True)
-            with path.open('x', encoding='utf-8') as stream:
-                for row in output:
-                    stream.write(json.dumps(row, ensure_ascii=False, separators=(',', ':')) + '\n')
+            last_ordinal, count = -1, 1
+            with path.open('x', encoding='utf-8') as output:
+                output.write(json.dumps(leaf_meta, ensure_ascii=False, separators=(',', ':')) + '\n')
+                for index, page in enumerate(chain):
+                    source_path = pages[page]['path']
+                    limit = (pages[chain[index + 1]]['history_base']['end_byte_offset']
+                             if index + 1 < len(chain) else source_path.stat().st_size)
+                    position, number = 0, 0
+                    with source_path.open('rb') as stream:
+                        while position < limit:
+                            line = stream.readline(ns.MAX_CHAT_BYTES + 1)
+                            if not line or len(line) > ns.MAX_CHAT_BYTES or not line.endswith(b'\n'):
+                                raise ns.SyncError('Incomplete or oversized mock page record')
+                            position += len(line)
+                            if position > limit:
+                                raise ns.SyncError('Mock page boundary is not a record boundary')
+                            row = json.loads(line)
+                            if not isinstance(row, dict) or type(row.get('ordinal')) is not int or row['ordinal'] <= last_ordinal:
+                                raise ns.SyncError('Mock ordinals are ambiguous')
+                            last_ordinal = row['ordinal']
+                            if number:
+                                if nested_ordinal(row.get('payload')):
+                                    raise ns.SyncError('Nested ordinal is unsupported')
+                                row['ordinal'] = count
+                                output.write(json.dumps(row, ensure_ascii=False, separators=(',', ':')) + '\n')
+                                count += 1
+                            number += 1
             destination.mkdir(mode=0o700)
             for child in staged.iterdir():
                 os.replace(child, destination / child.name)
-        return len(output)
+        return count
 
 
 def add_thread(source: Path, profile: Path, shared: Path, key: bytes,
@@ -473,14 +487,17 @@ def index_thread(profile: Path, shared: Path, key: bytes, thread_id: str,
         raise ns.SyncError('Mock lineage is incomplete')
     if len(pages) > 1:
         raise ns.SyncError('Multi-page mock projection is not verified')
+    kind = cosync_receive_plan.source_kind(pages)
+    if kind not in ('chat', 'subagent') or (kind == 'subagent' and title is not None):
+        raise ns.SyncError('Unsupported mock thread source')
     page_ids = {lineage._page_id(item['path'], thread_id): item for item in pages}
     parents = {item['history_base']['thread_id'] for item in pages if item.get('history_base')}
     leaves = set(page_ids) - parents
     if len(leaves) != 1:
         raise ns.SyncError('Branched mock lineage is unsupported')
     leaf = page_ids[leaves.pop()]
-    expected_messages = _expected_visible_messages(leaf['path'])
-    if not any(key.startswith('user:') for key in expected_messages):
+    expected_messages = _expected_visible_messages(leaf['path'], subagent=kind == 'subagent')
+    if kind == 'chat' and not any(key.startswith('user:') for key in expected_messages):
         raise ns.SyncError('Mock conversation has no verifiable user messages')
     with mock._mock_thread_lock(profile, thread_id):
         pass
@@ -492,7 +509,13 @@ def index_thread(profile: Path, shared: Path, key: bytes, thread_id: str,
     output = queue.Queue()
     def pump():
         try:
-            for line in process.stdout:
+            while line := process.stdout.readline(32 * 1024 * 1024 + 1):
+                if len(line) > 32 * 1024 * 1024 or not line.endswith(b'\n'):
+                    try:
+                        process.terminate()
+                    except ProcessLookupError:
+                        pass
+                    break
                 output.put(line)
         finally:
             output.put(None)
@@ -525,7 +548,7 @@ def index_thread(profile: Path, shared: Path, key: bytes, thread_id: str,
             number += 1
         cursor, seen, actual_messages = None, set(), Counter()
         while True:
-            params = {'threadId': thread_id, 'itemsView': 'full', 'limit': 100}
+            params = {'threadId': thread_id, 'itemsView': 'full', 'limit': 10}
             if cursor is not None:
                 params['cursor'] = cursor
             result = call(number, 'thread/turns/list', params)
@@ -568,6 +591,11 @@ def index_thread(profile: Path, shared: Path, key: bytes, thread_id: str,
             seen.add(cursor)
         if expected_messages - actual_messages:
             raise ns.SyncError('Mock messages are missing from the index')
+        if kind == 'subagent':
+            result = call(number, 'thread/read', {'threadId': thread_id, 'includeTurns': False})
+            if not isinstance(result, dict) or not isinstance(result.get('thread'), dict) or result['thread'].get('id') != thread_id:
+                raise ns.SyncError('Mock subagent cannot be read')
+            return
         cursor, seen = None, set()
         while True:
             params = {'limit': 100, 'useStateDbOnly': True}

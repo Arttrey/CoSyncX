@@ -75,6 +75,11 @@ class RestoreGate:
         return {'id': uuid.uuid4().hex, 'state': 'RESTORED', 'indexed': True,
                 'changed_chats': result['changed_chats']}
 
+    def is_current(self, *, now: float | None = None) -> bool:
+        now = time.monotonic() if now is None else now
+        return (self._revision is not None and self._revision == self.completed_revision
+                and self._since is not None and now - self._since >= self.quiet_seconds)
+
 
 class MultiFolderGate:
     """Require both received histories and their title index to be settled."""
@@ -137,3 +142,9 @@ class MultiFolderGate:
             return None
         return {'id': uuid.uuid4().hex, 'state': 'RESTORED', 'indexed': True,
                 'changed_chats': result['changed_chats']}
+
+    def is_current(self, *, now: float | None = None) -> bool:
+        now = time.monotonic() if now is None else now
+        if self._current is None or self._since is None or now - self._since < self.quiet_seconds:
+            return False
+        return tuple((folder, remote) for folder, remote, _ in self._current) == self._completed

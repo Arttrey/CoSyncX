@@ -52,9 +52,9 @@ function activate(context) {
                 COMPLETE: '$(check) CoSyncX: восстановлено', ERROR: '$(warning) CoSyncX: ошибка' };
             item.text = labels[status.state];
             item.tooltip = 'Локальный статус CoSyncX';
-            if (status.state === 'COMPLETE') {
-                maybeReload(status.restore_event, cfg.get('autoReloadAfterRestore') === true).catch(() => {});
-            }
+            // An earlier successful restore may still need a reload even when
+            // a newer transfer is already pending or in progress.
+            maybeReload(status.restore_event, cfg.get('autoReloadAfterRestore') === true).catch(() => {});
         }).catch(() => {});
     }
     function refresh() {

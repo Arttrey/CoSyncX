@@ -20,7 +20,7 @@ class RestoreStatusTests(unittest.TestCase):
             self.assertEqual(saved['state'], 'COMPLETE')
             self.assertNotIn('private_extra', saved['restore_event'])
             if os.name != 'nt': self.assertEqual(status.stat().st_mode & 0o777, 0o600)
-            with self.assertRaises(StatusError): write_status(status, 'PENDING', mock_only=False, event=event)
+            with self.assertRaises(StatusError): write_status(status, 'PENDING', mock_only=False, event={**event, 'indexed': False})
             self.assertEqual(json.loads(status.read_text()), saved)
             link = root / 'link'
             link.symlink_to(status)

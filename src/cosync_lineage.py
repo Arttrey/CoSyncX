@@ -82,7 +82,9 @@ def prepare_lineage(incoming: Path, destination: Path, thread_id: str,
                 old_pos = new_pos = 0
                 offsets = {}
                 with source.open('rb') as inp, output.open('xb') as out:
-                    for line in inp:
+                    while line := inp.readline(ns.MAX_CHAT_BYTES + 1):
+                        if len(line) > ns.MAX_CHAT_BYTES:
+                            raise ns.SyncError('Paginated record is too large')
                         if not line.endswith(b'\n'): raise ns.SyncError('Incomplete paginated record')
                         original_length = len(line)
                         try: record = json.loads(line)

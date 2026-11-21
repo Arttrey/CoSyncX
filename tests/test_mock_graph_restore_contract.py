@@ -9,6 +9,8 @@ import unittest
 
 import mock_chat_sync as mock
 import mock_graph_restore
+import mock_paginated_import
+import cosync_restore_backup
 from test_codex_contract import read_rpc_response, stop_server
 
 
@@ -36,11 +38,22 @@ class MockGraphRestoreContractTests(unittest.TestCase):
                          {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'synthetic'}]}},
                         {'timestamp': '2026-01-01T00:00:01.001Z', 'type': 'event_msg', 'payload':
                          {'type': 'user_message', 'message': 'synthetic', 'images': [], 'local_images': [], 'text_elements': []}}]
+                if identity == child:
+                    rows.extend([{'timestamp': '2026-01-01T00:00:02.000Z', 'type': 'response_item', 'payload':
+                                  {'type': 'message', 'role': 'assistant', 'content':
+                                   [{'type': 'output_text', 'text': 'synthetic child result'}]}},
+                                 {'timestamp': '2026-01-01T00:00:02.001Z', 'type': 'event_msg', 'payload':
+                                  {'type': 'agent_message', 'message': 'synthetic child result'}}])
                 files[identity] = sessions / f'rollout-2026-01-01T00-00-00-{identity}.jsonl'
                 files[identity].write_text(''.join(json.dumps(row) + '\n' for row in rows))
             migration = subprocess.run([shutil.which('codex'), 'migrate-rollouts', '--apply', '--json'],
                 env={**os.environ, 'CODEX_HOME': str(profile)}, capture_output=True, text=True, timeout=30)
             self.assertEqual(migration.returncode, 0, migration.stderr)
+            child_rows = [json.loads(line) for line in files[child].read_text().splitlines()]
+            start = next(row['ordinal'] for row in child_rows if row.get('type') == 'response_item'
+                         and row.get('payload', {}).get('role') == 'assistant')
+            child_rows[0]['payload']['subagent_history_start_ordinal'] = start
+            files[child].write_text(''.join(json.dumps(row) + '\n' for row in child_rows))
             def start():
                 server = subprocess.Popen([shutil.which('codex'), 'app-server', '--listen', 'stdio://'],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0,
@@ -67,6 +80,9 @@ class MockGraphRestoreContractTests(unittest.TestCase):
                 self.assertNotIn(child, [row['id'] for row in listing(server, 4)])
             finally:
                 stop_server(server)
+            cosync_restore_backup.replace_latest(profile, backup, ['state_5.sqlite', 'thread_history_1.sqlite'])
+            mock_paginated_import.reset_mock_projection(profile, shared, backup, key, child)
+            mock_paginated_import.index_thread(profile, shared, key, child, Path(shutil.which('codex')))
             graph = incoming / 'graph.json'
             graph.write_text(json.dumps({'format': 'cosyncx-active-graph-v1', 'created_at_ms': 1,
                 'omitted_archived': 0, 'omitted_missing': 0,

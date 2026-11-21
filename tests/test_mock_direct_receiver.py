@@ -170,7 +170,7 @@ class DirectReceiverTests(unittest.TestCase):
             first = receiver.poll(read, now=1)
             self.assertEqual(first['state'], 'COMPLETE')
             self.assertEqual(first['restore_event']['changed_chats'], 1)
-            self.assertEqual(receiver.poll(read, now=2)['state'], 'WAITING')
+            self.assertEqual(receiver.poll(read, now=2)['state'], 'CURRENT')
             # A new remote index sequence alone is not proof of a chat change.
             state['remoteSequence']['vps'] = 2
             state['sequence'] = 2

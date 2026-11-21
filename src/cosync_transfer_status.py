@@ -1,48 +1,19 @@
 """Read-only status of one Syncthing folder; never claims chats were imported."""
 import argparse
 import json
-import os
 from pathlib import Path
-import stat
-import time
 from urllib.parse import quote
 
 from cosync_engine import ExistingEngine, EngineError
+from cosync_restore_status import read_status
 
 
 def restore_status(path: Path) -> str | None:
     """Read a fresh private receiver status; never accept mock results."""
-    if not path.is_absolute():
-        return None
-    try:
-        before = path.lstat()
-        if not stat.S_ISREG(before.st_mode) or before.st_size > 65536:
-            return None
-        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
-        fd = os.open(path, flags)
-        with os.fdopen(fd, 'rb') as stream:
-            opened = os.fstat(stream.fileno())
-            if (not stat.S_ISREG(opened.st_mode) or opened.st_size > 65536
-                    or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
-                return None
-            if os.name != 'nt' and (opened.st_uid != os.getuid() or stat.S_IMODE(opened.st_mode) & 0o077):
-                return None
-            raw = stream.read(65537)
-            after = os.fstat(stream.fileno())
-        if (len(raw) != opened.st_size or (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
-                != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
-            return None
-        value = json.loads(raw)
-        now = int(time.time() * 1000)
-        if (not isinstance(value, dict) or value.get('format') != 'cosyncx-restore-status-v1'
-                or value.get('mock_only') is not False or type(value.get('updated_at_ms')) is not int
-                or value['updated_at_ms'] > now + 5000 or now - value['updated_at_ms'] > 90000):
-            return None
-        states = {'TRANSFERRING': 'TRANSFERRING', 'RESTORING': 'RESTORING',
-                  'PENDING': 'PENDING', 'COMPLETE': 'RESTORED', 'ERROR': 'ERROR'}
-        return states.get(value.get('state'))
-    except (OSError, ValueError, TypeError):
-        return None
+    value = read_status(path, mock_only=False)
+    states = {'TRANSFERRING': 'TRANSFERRING', 'RESTORING': 'RESTORING',
+              'PENDING': 'PENDING', 'COMPLETE': 'RESTORED', 'ERROR': 'ERROR'}
+    return states.get(value.get('state')) if value is not None else None
 
 
 def transfer_status(client, folder, peer):

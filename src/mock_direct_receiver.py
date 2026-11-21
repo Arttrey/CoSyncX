@@ -128,7 +128,7 @@ class MockDirectReceiver:
                     pages_import.index_thread(self.profile, self.shared, self.key, thread, self.codex)
             return True
 
-    def poll(self, status_reader, *, title_status_reader=None, now=None):
+    def poll(self, status_reader, *, title_status_reader=None, on_restore=None, now=None):
         first = status_reader()
         if self.titles is None:
             folder, status, connected, remote_state = first
@@ -140,8 +140,10 @@ class MockDirectReceiver:
             observations = {first[0]: first, second[0]: second}
             revision = self.gate.observe(observations, now=now)
         if revision is None:
-            return {'state': 'WAITING', 'mock_only': True}
+            return {'state': 'CURRENT' if self.gate.is_current(now=now) else 'WAITING', 'mock_only': True}
         try:
+            if on_restore is not None:
+                on_restore()
             before = self._chat_digests()
             before_titles = self._title_names()
             try:

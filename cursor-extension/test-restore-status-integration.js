@@ -50,6 +50,13 @@ const waitFor = async predicate => {
         refresh();
         await new Promise(resolve => setTimeout(resolve, 50));
         assert.strictEqual(calls.length, 1);
+        const later = {...event, id: 'b'.repeat(32)};
+        fs.writeFileSync(file, JSON.stringify({format: 'cosyncx-restore-status-v1', updated_at_ms: Date.now(),
+            mock_only: false, state: 'PENDING', restore_event: later}));
+        refresh();
+        await waitFor(() => calls.length === 2);
+        assert.strictEqual(statusItem.text, '$(warning) CoSyncX: ожидание');
+        assert.deepStrictEqual(calls, ['workbench.action.reloadWindow', 'workbench.action.reloadWindow']);
         console.log('Cursor status-to-reload integration: OK');
     } finally {
         for (const item of context.subscriptions) if (item && item.dispose) item.dispose();

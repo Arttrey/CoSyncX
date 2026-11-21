@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.request
@@ -15,6 +16,7 @@ import xml.etree.ElementTree as ET
 import cosync_engine as engine
 from cosync_syncthing_watch import SyncthingSource
 from mock_direct_receiver import MockDirectReceiver
+from mock_direct_supervisor import MockSupervisor
 import mock_chat_sync as mock
 
 
@@ -41,6 +43,8 @@ class DirectSyncthingIntegrationTests(unittest.TestCase):
                 (sender_home / name).write_text('synthetic private data')
             homes = [root / 'sender-engine', root / 'receiver-engine']
             clients, processes, keys = [], [], []
+            stop = threading.Event()
+            worker = None
             binary = Path(shutil.which('syncthing')).resolve(strict=True)
             try:
                 for index in range(2):
@@ -86,6 +90,12 @@ class DirectSyncthingIntegrationTests(unittest.TestCase):
                     titles=titles_received, titles_folder_id='mock-titles')
                 watch = SyncthingSource(clients[1], 'mock-chats', ids[0], received)
                 watch_titles = SyncthingSource(clients[1], 'mock-titles', ids[0], titles_received)
+                status_dir = root / 'status'
+                status_dir.mkdir(mode=0o700)
+                status_file = status_dir / 'status.json'
+                supervisor = MockSupervisor(receiver, watch.read, status_file, title_reader=watch_titles.read)
+                worker = threading.Thread(target=supervisor.run, args=(stop, 0.2), daemon=True)
+                worker.start()
                 def add(number):
                     identity = f'019b0000-0000-7000-8000-{number:012d}'
                     rows = [
@@ -107,16 +117,21 @@ class DirectSyncthingIntegrationTests(unittest.TestCase):
                         self.assertEqual(migrated.returncode, 0, migrated.stderr)
                         shutil.copyfile(chat, source / chat.name)
                     clients[0]._post('db/scan?folder=mock-chats', {})
+                last_event = None
                 def wait_restore(expected_count):
+                    nonlocal last_event
                     deadline = time.monotonic() + 45
                     while time.monotonic() < deadline:
                         try:
-                            result = receiver.poll(watch.read, title_status_reader=watch_titles.read)
-                            if result.get('state') == 'COMPLETE' and result.get('restore_event'):
-                                self.assertEqual(result['restore_event']['changed_chats'], expected_count)
-                                self.assertTrue(result['restore_event']['mock_only'])
+                            result = json.loads(status_file.read_text())
+                            event = result.get('restore_event')
+                            if result.get('state') == 'COMPLETE' and event and event['id'] != last_event:
+                                self.assertEqual(event['changed_chats'], expected_count)
+                                self.assertTrue(event['mock_only'])
+                                self.assertTrue(result['mock_only'])
+                                last_event = event['id']
                                 return
-                        except (engine.EngineError, OSError):
+                        except (OSError, ValueError, KeyError):
                             pass
                         time.sleep(0.2)
                     self.fail('Isolated transfer did not produce an indexed mock restore')
@@ -142,6 +157,9 @@ class DirectSyncthingIntegrationTests(unittest.TestCase):
                 wait_restore(1)
                 self.assertIn('second synthetic title', (profile / 'session_index.jsonl').read_text())
             finally:
+                stop.set()
+                if worker is not None:
+                    worker.join(timeout=20)
                 for index, process in enumerate(processes):
                     if process.poll() is None:
                         req = urllib.request.Request(f'http://127.0.0.1:{ports[index]}/rest/system/shutdown',
