@@ -10,6 +10,38 @@ from cosync_direct_restore import DirectReceiver
 
 
 class DirectMessagePolicyTests(unittest.TestCase):
+    def test_cached_history_requires_unchanged_source_local_and_index(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve(); source = root / 'source'; profile = root / 'profile'
+            source.mkdir(); profile.mkdir(); remote = source / 'chat.jsonl'; local = profile / 'chat.jsonl'
+            remote.write_text('received'); local.write_text('local')
+            identity = '019b0000-0000-7000-8000-000000000001'
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                db.execute('CREATE TABLE threads (id TEXT, rollout_path TEXT, title TEXT, archived INTEGER)')
+                db.execute('INSERT INTO threads VALUES (?,?,?,0)', (identity, str(local), 'older database title'))
+            with sqlite3.connect(profile / 'thread_history_1.sqlite') as db:
+                db.execute('CREATE TABLE thread_history_projection_state (thread_id TEXT, next_rollout_byte_offset INTEGER, next_rollout_ordinal INTEGER)')
+                db.execute('INSERT INTO thread_history_projection_state VALUES (?,10,2)', (identity,))
+            (profile / 'session_index.jsonl').write_text(json.dumps({'id': identity, 'thread_name': 'name'}) + '\n')
+            receiver = DirectReceiver.__new__(DirectReceiver)
+            receiver.source, receiver.profile, receiver._verified_sources = source, profile, {}
+            receiver.verified = {identity: (hashlib.sha256(local.read_bytes()).hexdigest(), 'name')}
+            fingerprint = hashlib.sha256(remote.read_bytes()).hexdigest()
+            receiver._cache_verified_sources({identity: fingerprint})
+            incoming = {identity: [{'path': remote}]}; current = {identity: [{'path': local, 'folder': 'sessions'}]}
+            def cached(): return receiver._cached_unchanged(incoming, current, {identity: 'name'}, {identity: 'chat'}, set())[0]
+            self.assertEqual(cached(), {identity})
+            remote.write_text('new received')
+            self.assertEqual(cached(), set())
+            remote.write_text('received')
+            local.write_text('new local')
+            self.assertEqual(cached(), set())
+            local.write_text('local')
+            with sqlite3.connect(profile / 'thread_history_1.sqlite') as db:
+                db.execute('UPDATE thread_history_projection_state SET next_rollout_ordinal=3')
+            self.assertEqual(cached(), set())
+
     def test_interrupted_verification_reuses_only_matching_indexed_chats(self):
         import hashlib
         with tempfile.TemporaryDirectory() as tmp:

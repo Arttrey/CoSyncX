@@ -73,6 +73,8 @@ class DirectReceiver:
         self.gate = cosync_auto_gate.MultiFolderGate(folder_ids=folder_ids, peer_id=peer_id,
                                                      quiet_seconds=quiet_seconds)
         self.verified = {}
+        self._verified_sources = {}
+        self._last_fingerprints = {}
         self.pending_result = None
         self.unresolved_archived_count = 0
         self.pending_busy_ids = frozenset()
@@ -105,6 +107,67 @@ class DirectReceiver:
             return Path(lineage._map_cwd(cwd, self.mappings))
         except (ns.SyncError, OSError, ValueError):
             return None
+
+    def _index_evidence(self):
+        """Read only the per-thread index fields used to validate cached work."""
+        try:
+            state, history = self.profile / 'state_5.sqlite', self.profile / 'thread_history_1.sqlite'
+            if any(p.is_symlink() or not p.is_file() for p in (state, history)):
+                return {}
+            with closing(sqlite3.connect(state.as_uri() + '?mode=ro', uri=True)) as db:
+                rows = {r[0]: tuple(r[1:]) for r in db.execute('SELECT id, rollout_path, title, archived FROM threads')}
+            with closing(sqlite3.connect(history.as_uri() + '?mode=ro', uri=True)) as db:
+                projections = {r[0]: tuple(r[1:]) for r in db.execute(
+                    'SELECT thread_id, next_rollout_byte_offset, next_rollout_ordinal FROM thread_history_projection_state')}
+            return {identity: (row, projections[identity]) for identity, row in rows.items() if identity in projections}
+        except (sqlite3.Error, OSError):
+            return {}
+
+    def _cache_verified_sources(self, fingerprints):
+        if not isinstance(fingerprints, dict):
+            return
+        evidence = self._index_evidence()
+        for identity, fingerprint in fingerprints.items():
+            if identity in self.verified and identity in evidence:
+                self._verified_sources[identity] = (fingerprint, self.verified[identity], evidence[identity])
+
+    def _cached_unchanged(self, incoming, local, names, kinds, skipped):
+        """Reuse only verified histories whose files and per-thread index match."""
+        evidence = self._index_evidence()
+        title_data = ns._read_title_index(self.profile)
+        local_names = ({row['id']: row['thread_name'] for row in ns._parse_title_index(title_data)}
+                       if title_data is not None else {})
+        unchanged, fingerprints = set(), {}
+        for identity, entries in incoming.items():
+            cached, current = self._verified_sources.get(identity), local.get(identity, [])
+            expected_title = names.get(identity) if kinds[identity] == 'chat' else None
+            if (identity in skipped or not cached or len(current) != 1 or current[0]['folder'] != 'sessions'
+                    or self.verified.get(identity) != cached[1] or evidence.get(identity) != cached[2]
+                    or cached[2][0][0] != str(current[0]['path']) or cached[2][0][2] != 0
+                    or cached[1][1] != expected_title or (expected_title is not None and
+                        local_names.get(identity) != expected_title)):
+                continue
+            try:
+                if len(entries) > 1:
+                    pages = {lineage._page_id(item['path'], identity) for item in entries}
+                    if any(isinstance(item.get('history_base'), dict)
+                           and item['history_base'].get('thread_id') in pages
+                           for other, others in incoming.items() if other != identity for item in others):
+                        continue
+                paths = sorted((item['path'] for item in entries), key=str)
+                target = current[0]['path']
+                all_paths = paths + [target]
+                before = [(p.stat().st_ino, p.stat().st_size, p.stat().st_mtime_ns, p.stat().st_ctime_ns) for p in all_paths]
+                fingerprint = (ns._digest(paths[0]) if len(paths) == 1 else
+                               [[p.relative_to(self.source).as_posix(), ns._digest(p)] for p in paths])
+                target_digest = ns._digest(target)
+                after = [(p.stat().st_ino, p.stat().st_size, p.stat().st_mtime_ns, p.stat().st_ctime_ns) for p in all_paths]
+                if before == after and fingerprint == cached[0] and target_digest == cached[1][0]:
+                    unchanged.add(identity)
+                    fingerprints[identity] = fingerprint
+            except (OSError, ValueError, ns.SyncError):
+                continue
+        return unchanged, fingerprints
 
     def _write_path_report(self, reports):
         """Keep missing local paths private and available across restarts."""
@@ -266,8 +329,7 @@ class DirectReceiver:
                 if (identity in busy or identity not in projected or len(entries) != 1
                         or entries[0]['folder'] != 'sessions' or not isinstance(item, dict)
                         or not row or row[2] != 0 or row[0] != str(entries[0]['path'])
-                        or (item.get('title') is not None and
-                            (row[1] != item['title'] or titles.get(identity) != item['title']))):
+                        or (item.get('title') is not None and titles.get(identity) != item['title'])):
                     continue
                 path = entries[0]['path']
                 before = path.stat()
@@ -281,6 +343,7 @@ class DirectReceiver:
                 return False
             journal.unlink()
             self.verified.update(reusable)
+            self._cache_verified_sources(record.get('source_fingerprints'))
             return True
         except (OSError, ValueError, TypeError, sqlite3.Error, ns.SyncError):
             return False
@@ -535,11 +598,14 @@ class DirectReceiver:
                     skipped.update(self.pending_busy_ids)
             except (quiescence.QuiescenceError, locking.MockChatBusy, FileNotFoundError):
                 return None
+        cached_ids, cached_fingerprints = (self._cached_unchanged(incoming, local, names, source_kinds, skipped)
+                                            if self.prefer_more_messages and prior is None and self._verified_sources
+                                            else (set(), {}))
         if self.prefer_more_messages and prior is None:
             with tempfile.TemporaryDirectory(prefix='cosyncx-message-policy-') as tmp:
                 for number, (identity, entries) in enumerate(incoming.items()):
                     current = local.get(identity, [])
-                    if identity in skipped:
+                    if identity in skipped or identity in cached_ids:
                         continue
                     if current and (len(current) != 1 or current[0]['folder'] != 'sessions'):
                         skipped.add(identity)
@@ -628,11 +694,14 @@ class DirectReceiver:
                 depth[item] = base
         fingerprints = {}
         for identity, entries in incoming.items():
-            if len(entries) == 1:
+            if identity in cached_fingerprints:
+                fingerprints[identity] = cached_fingerprints[identity]
+            elif len(entries) == 1:
                 fingerprints[identity] = ns._digest(entries[0]['path'])
             else:
                 fingerprints[identity] = [[item['path'].relative_to(self.source).as_posix(), ns._digest(item['path'])]
                                           for item in sorted(entries, key=lambda item: str(item['path']))]
+        self._last_fingerprints = fingerprints
         if prior is not None:
             latest = self.backup_root / 'latest'
             manifest = latest / 'manifest.json'
@@ -763,6 +832,8 @@ class DirectReceiver:
             for number, (identity, entries) in enumerate(sorted(incoming.items())):
                 if not entries or kinds[identity] not in ('chat', 'subagent'):
                     return None
+                if identity in cached_ids:
+                    continue
                 stage = Path(temp).resolve() / str(number)
                 fallback = (self._existing_workspace(local.get(identity, [])) if self.prefer_more_messages
                             else Path(self.mappings[0][1]))
@@ -1012,6 +1083,7 @@ class DirectReceiver:
             event = self.gate.complete(revision, result, after=observe())
         except ValueError:
             return {'state': 'PENDING', 'mock_only': False}
+        self._cache_verified_sources(self._last_fingerprints)
         if event is not None:
             event['mock_only'] = False
             if not carry and (not record or record.get('phase') != 'indexed'):
