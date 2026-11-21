@@ -16,6 +16,63 @@ from test_codex_contract import read_rpc_response, stop_server
 
 
 class DirectRestoreTests(unittest.TestCase):
+    def test_source_change_after_indexing_is_reconciled_before_reload(self):
+        with tempfile.TemporaryDirectory(prefix='cosyncx-source-change-') as tmp:
+            root = Path(tmp).resolve()
+            source, titles, graph, profile, backups, project = (root / name for name in
+                ('source', 'titles', 'graph', 'profile', 'backups', 'project'))
+            for path in (source, titles, graph, profile, backups, project):
+                path.mkdir(mode=0o700)
+            sessions = source / 'sessions'; sessions.mkdir()
+            identity = '019b0000-0000-7000-8000-000000000051'
+            meta = {'id': identity, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': '/source/Nexus',
+                    'originator': 'codex_vscode', 'cli_version': '0.1.0', 'source': 'vscode',
+                    'model_provider': 'openai', 'history_mode': 'paginated'}
+            history = sessions / f'rollout-2026-01-01T00-00-00-{identity}.jsonl'
+            history.write_text(json.dumps({'timestamp': meta['timestamp'], 'type': 'session_meta',
+                                           'payload': meta, 'ordinal': 0}) + '\n')
+            (titles / 'session_index.jsonl').write_text(json.dumps({'id': identity, 'thread_name': 'test'}) + '\n')
+            (graph / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1', 'edges': [],
+                'omitted_missing': 0, 'omitted_archived': 0}))
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                db.execute('CREATE TABLE threads (id TEXT PRIMARY KEY, archived INTEGER)')
+            with sqlite3.connect(profile / 'thread_history_1.sqlite') as db:
+                db.execute('CREATE TABLE example (id INTEGER)')
+            args = dict(source=source, titles=titles, graph=graph, profile=profile, backup_root=backups,
+                key=b'k' * 32, mappings=[('/source/Nexus', str(project))], codex=Path(sys.executable),
+                folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0)
+            def index(_profile, thread, *_args, **_kwargs):
+                with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                    db.execute('INSERT OR IGNORE INTO threads VALUES (?, 0)', (thread,))
+                (profile / 'session_index.jsonl').write_text(json.dumps({'id': thread, 'thread_name': 'test'}) + '\n')
+            first = DirectReceiver(**args)
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True), \
+                    patch('cosync_direct_restore.indexer._index_profile', side_effect=index), \
+                    patch('cosync_direct_restore.indexer._reset_profile_projection'):
+                self.assertEqual(first._receive(), 1)
+                original_id = json.loads((backups / 'direct-restore-pending.json').read_text())['event_id']
+                with history.open('a') as out:
+                    out.write(json.dumps({'timestamp': '2026-01-01T00:00:01.000Z', 'type': 'event_msg',
+                        'ordinal': 1, 'payload': {'type': 'agent_message', 'message': 'later source'}}) + '\n')
+                receiver = DirectReceiver(**args)
+                self.assertEqual(receiver._receive(), 1)
+                self.assertTrue((backups / 'direct-restore-carry.json').is_file())
+                state = {'state': 'idle', 'sequence': 2, 'remoteSequence': {'vps': 2}, 'needFiles': 0,
+                         'needDirectories': 0, 'needSymlinks': 0, 'needDeletes': 0, 'errors': 0, 'pullErrors': 0}
+                def read(folder): return lambda: (folder, state, True, 'valid')
+                readers = (read('sessions'), read('titles'), read('graph'))
+                self.assertEqual(receiver.poll(readers[0], title_status_reader=readers[1],
+                    graph_status_reader=readers[2], now=0)['state'], 'WAITING')
+                result = receiver.poll(readers[0], title_status_reader=readers[1],
+                    graph_status_reader=readers[2], now=1)
+            self.assertEqual(result['state'], 'COMPLETE')
+            self.assertEqual(result['restore_event']['id'], original_id)
+            self.assertEqual(result['restore_event']['changed_chats'], 2)
+            self.assertIn(b'later source', (profile / 'sessions' / history.name).read_bytes())
+            receiver.acknowledge(result['restore_event'])
+            self.assertFalse((backups / 'direct-restore-carry.json').exists())
+            self.assertFalse((backups / 'direct-restore-pending.json').exists())
+
     def test_resume_after_one_indexed_chat_does_not_repeat_it(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-index-resume-') as tmp:
             root = Path(tmp).resolve()
@@ -518,6 +575,15 @@ class DirectRestoreTests(unittest.TestCase):
             multi_path = next((profile / 'sessions').rglob(base_name + '.jsonl'))
             self.assertIn(b'page message 3', multi_path.read_bytes())
             self.assertEqual((backups / 'latest' / multi_path.relative_to(profile)).read_bytes(), imported)
+            with (titles / 'session_index.jsonl').open('a') as out:
+                out.write(json.dumps({'id': multi, 'thread_name': 'Renamed'}) + '\n')
+            renamed = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
+                backup_root=backups, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
+                codex=Path(codex), folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0)
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True):
+                self.assertEqual(renamed._receive(), 1)
+            self.assertTrue((backups / 'direct-restore-carry.json').is_file())
+            self.assertIn('Renamed', (profile / 'session_index.jsonl').read_text())
 
 
 if __name__ == '__main__':

@@ -92,6 +92,45 @@ class DirectReceiver:
         finally:
             temporary.unlink(missing_ok=True)
 
+    def _read_carry(self):
+        path = self.backup_root / 'direct-restore-carry.json'
+        if not path.exists() and not path.is_symlink():
+            return []
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 1024 * 1024:
+            raise ns.SyncError('Direct restore carry is unavailable')
+        value = json.loads(path.read_bytes())
+        if (not isinstance(value, dict) or value.get('version') != 1 or not isinstance(value.get('events'), list)
+                or not isinstance(value.get('authentication'), str)
+                or not hmac.compare_digest(value['authentication'], ns._manifest_tag(value, self.key))):
+            raise ns.SyncError('Direct restore carry is invalid')
+        events = value['events']
+        if (any(not isinstance(event, dict) or set(event) != {'id', 'count'}
+                or not isinstance(event['id'], str) or len(event['id']) != 32
+                or type(event['count']) is not int or event['count'] < 1 for event in events)
+                or len({event['id'] for event in events}) != len(events)):
+            raise ns.SyncError('Direct restore carry events are invalid')
+        return events
+
+    def _write_carry(self, events):
+        path = self.backup_root / 'direct-restore-carry.json'
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise ns.SyncError('Direct restore carry is unavailable')
+        value = {'version': 1, 'events': events}
+        value['authentication'] = ns._manifest_tag(value, self.key)
+        fd, temporary = tempfile.mkstemp(prefix='.cosyncx-direct-carry-', dir=self.backup_root)
+        temporary = Path(temporary)
+        try:
+            if hasattr(os, 'fchmod'):
+                os.fchmod(fd, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                json.dump(value, stream, sort_keys=True)
+                stream.flush(); os.fsync(stream.fileno())
+            if path.is_symlink() or (path.exists() and not path.is_file()):
+                raise ns.SyncError('Direct restore carry is unavailable')
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def _database_state(self, names):
         result = {}
         for name in sorted(names):
@@ -158,13 +197,20 @@ class DirectReceiver:
 
     def acknowledge(self, event):
         record = self._read_journal()
-        changed = len(record.get('threads', [])) if record else -1
-        if (not record or record.get('phase') != 'indexed' or
+        carry = self._read_carry()
+        if record is not None and record.get('phase') != 'indexed':
+            raise ns.SyncError('Direct restore acknowledgement mismatch')
+        changed = (len(record.get('threads', [])) if record else 0) + sum(item['count'] for item in carry)
+        event_id = carry[0]['id'] if carry else (record.get('event_id') if record else None)
+        if ((record is None and not carry) or
                 (changed == 0 and event is not None) or
-                (changed > 0 and (not isinstance(event, dict) or event.get('id') != record.get('event_id')
+                (changed > 0 and (not isinstance(event, dict) or event.get('id') != event_id
                  or event.get('indexed') is not True or event.get('changed_chats') != changed))):
             raise ns.SyncError('Direct restore acknowledgement mismatch')
-        (self.backup_root / 'direct-restore-pending.json').unlink()
+        if record is not None:
+            (self.backup_root / 'direct-restore-pending.json').unlink()
+        if carry:
+            (self.backup_root / 'direct-restore-carry.json').unlink()
         self.pending_result = None
 
     def _recover_interrupted(self, record) -> bool:
@@ -261,6 +307,7 @@ class DirectReceiver:
 
     def _receive(self) -> int | None:
         journal = self.backup_root / 'direct-restore-pending.json'
+        self._read_carry()
         prior = self._read_journal() if journal.exists() or journal.is_symlink() else None
         if (journal.exists() or journal.is_symlink()) and not prior:
             return None
@@ -380,13 +427,49 @@ class DirectReceiver:
                     return None
                 if not isinstance(digest, str) or ns._digest(saved_file) != digest:
                     return None
-            if (len(fingerprints) != len(incoming) or prior.get('source_fingerprints') != fingerprints
-                    or prior.get('title_digest') != hashlib.sha256(title_bytes).hexdigest()
-                    or prior.get('graph_digest') != hashlib.sha256(graph_bytes).hexdigest()
-                    or not isinstance(prior.get('verified'), dict)
+            source_same = (len(fingerprints) == len(incoming) and prior.get('source_fingerprints') == fingerprints
+                           and prior.get('title_digest') == hashlib.sha256(title_bytes).hexdigest()
+                           and prior.get('graph_digest') == hashlib.sha256(graph_bytes).hexdigest())
+            if (not isinstance(prior.get('verified'), dict)
                     or not isinstance(prior.get('threads'), list)
-                    or not set(prior['threads']) <= set(fingerprints)
                     or not isinstance(prior.get('event_id'), str) or len(prior['event_id']) != 32):
+                return None
+            if not source_same:
+                if (prior.get('phase') != 'indexed' or not isinstance(prior.get('source_fingerprints'), dict)
+                        or set(prior['verified']) != set(prior['source_fingerprints'])
+                        or not set(prior['threads']) <= set(prior['verified'])):
+                    return None
+                # Do not retire a confirmed receipt while Syncthing is still
+                # exposing an incomplete or changing new history.
+                try:
+                    with tempfile.TemporaryDirectory(prefix='cosyncx-source-check-') as tmp:
+                        for number, (identity, entries) in enumerate(sorted(incoming.items())):
+                            paths = sorted(entries, key=lambda item: str(item['path']))
+                            for index, item in enumerate(paths):
+                                ns._copy_stable_chat(item['path'], Path(tmp) / f'{number}-{index}.jsonl')
+                            actual = (ns._digest(paths[0]['path']) if len(paths) == 1 else
+                                      [[item['path'].relative_to(self.source).as_posix(), ns._digest(item['path'])]
+                                       for item in paths])
+                            if actual != fingerprints.get(identity):
+                                return None
+                except (ns.SyncError, OSError, ValueError):
+                    return None
+                for identity, item in prior['verified'].items():
+                    current = local.get(identity, [])
+                    if (len(current) != 1 or current[0]['folder'] != 'sessions' or not isinstance(item, dict)
+                            or item.get('digest') != ns._digest(current[0]['path'])):
+                        return None
+                    if not quiescence.is_quiet():
+                        return None
+                    indexer._index_profile(self.profile, identity, self.codex, title=item.get('title'))
+                    self.verified[identity] = (ns._digest(current[0]['path']), item.get('title'))
+                events = self._read_carry()
+                if prior['threads'] and all(event['id'] != prior['event_id'] for event in events):
+                    events.append({'id': prior['event_id'], 'count': len(prior['threads'])})
+                    self._write_carry(events)
+                journal.unlink()
+                return self._receive()
+            if not set(prior['threads']) <= set(fingerprints):
                 return None
             db_names = {name for name in saved['files'] if name.startswith(('state_', 'thread_history_'))
                         and name.endswith('.sqlite')}
@@ -624,18 +707,20 @@ class DirectReceiver:
         if count is None:
             return {'state': 'PENDING', 'mock_only': False}
         record = self._read_journal()
-        result = {'state': 'RESTORED', 'indexed': True, 'changed_chats': count}
+        carry = self._read_carry()
+        total = count + sum(item['count'] for item in carry)
+        result = {'state': 'RESTORED', 'indexed': True, 'changed_chats': total}
         try:
             event = self.gate.complete(revision, result, after=observe())
         except ValueError:
             return {'state': 'PENDING', 'mock_only': False}
         if event is not None:
             event['mock_only'] = False
-            if not record or record.get('phase') != 'indexed':
+            if not carry and (not record or record.get('phase') != 'indexed'):
                 raise ns.SyncError('Direct restore confirmation unavailable')
-            event['id'] = record['event_id']
+            event['id'] = carry[0]['id'] if carry else record['event_id']
         result = {'state': 'COMPLETE', 'mock_only': False, 'restore_event': event}
-        if record and record.get('phase') == 'indexed':
+        if carry or (record and record.get('phase') == 'indexed'):
             result['acknowledge_required'] = True
             self.pending_result = result
         return result
