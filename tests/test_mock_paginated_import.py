@@ -10,6 +10,7 @@ from unittest import mock as unit_mock
 import mock_chat_sync as mock
 from mock_direct_receiver import MockDirectReceiver
 import mock_paginated_import as importer
+import mock_graph_restore
 import nexus_sync as ns
 from test_codex_contract import read_rpc_response, stop_server
 
@@ -191,6 +192,54 @@ class MockPaginatedImportTests(unittest.TestCase):
         self.assertEqual(result['state'], 'COMPLETE')
         self.assertEqual(result['restore_event']['changed_chats'], 1)
         self.assertTrue(result['restore_event']['mock_only'])
+
+        # A flattened parent still needs its separately indexed child and edge.
+        child_id = '019b0000-0000-7000-8000-000000000003'
+        child_path = self.profile / 'sessions' / f'rollout-2026-01-01T00-00-00-{child_id}.jsonl'
+        child_home = self.root / 'child-build'
+        (child_home / 'sessions').mkdir(parents=True)
+        build_child = child_home / 'sessions' / child_path.name
+        child_rows = [{'timestamp': '2026-01-01T00:00:00.000Z', 'type': 'session_meta', 'payload':
+                       {'id': child_id, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': str(self.project),
+                        'originator': 'codex_vscode', 'cli_version': '0.1.0', 'model_provider': 'openai',
+                        'source': {'subagent': {'other': 'guardian'}}, 'parent_thread_id': self.thread}},
+                      {'timestamp': '2026-01-01T00:00:01.000Z', 'type': 'response_item', 'payload':
+                       {'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': 'synthetic child answer'}]}},
+                      {'timestamp': '2026-01-01T00:00:01.001Z', 'type': 'event_msg', 'payload':
+                       {'type': 'agent_message', 'message': 'synthetic child answer'}}]
+        build_child.write_text(''.join(json.dumps(row) + '\n' for row in child_rows))
+        migration = subprocess.run([shutil.which('codex'), 'migrate-rollouts', '--apply', '--json'],
+            env={**os.environ, 'CODEX_HOME': str(child_home)}, capture_output=True, text=True, timeout=30)
+        self.assertEqual(migration.returncode, 0, migration.stderr)
+        child_rows = [json.loads(line) for line in build_child.read_text().splitlines()]
+        start = next(row['ordinal'] for row in child_rows if row.get('type') == 'response_item')
+        child_rows[0]['payload']['subagent_history_start_ordinal'] = start
+        child_path.write_text(''.join(json.dumps(row) + '\n' for row in child_rows))
+        importer.index_thread(self.profile, self.shared, self.key, child_id, Path(shutil.which('codex')))
+        graph_dir, backups = self.root / 'graph-input', self.root / 'graph-backups'
+        graph_dir.mkdir()
+        backups.mkdir()
+        graph = graph_dir / 'graph.json'
+        graph.write_text(json.dumps({'format': 'cosyncx-active-graph-v1', 'created_at_ms': 1,
+            'omitted_archived': 0, 'omitted_missing': 0,
+            'edges': [{'parent': self.thread, 'child': child_id, 'status': 'closed'}]}))
+        self.assertEqual(mock_graph_restore.apply_graph(self.profile, self.shared, backups, graph, self.key), 1)
+        server = subprocess.Popen([shutil.which('codex'), 'app-server', '--listen', 'stdio://'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0,
+            env={**os.environ, 'CODEX_HOME': str(self.profile)})
+        try:
+            call(1, 'initialize', {'clientInfo': {'name': 'cosyncx-test', 'version': '0.1'},
+                                   'capabilities': {'experimentalApi': True}})
+            server.stdin.write(b'{"method":"initialized","params":{}}\n')
+            server.stdin.flush()
+            result = call(2, 'thread/list', {'parentThreadId': self.thread, 'sourceKinds':
+                ['subAgent', 'subAgentOther', 'subAgentThreadSpawn', 'subAgentReview', 'subAgentCompact'],
+                'useStateDbOnly': True, 'limit': 100})
+            self.assertIn(child_id, [item['id'] for item in result['result']['data']])
+            result = call(3, 'thread/turns/list', {'threadId': child_id, 'itemsView': 'full', 'limit': 10})
+            self.assertIn('synthetic child answer', json.dumps(result))
+        finally:
+            stop_server(server)
 
     @unittest.skipUnless(os.environ.get('NEXUS_TEST_CODEX') == '1' and shutil.which('codex'), 'requires disposable Codex')
     def test_direct_receiver_defers_unverified_multi_page_thread(self):
