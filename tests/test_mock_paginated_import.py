@@ -121,6 +121,32 @@ class MockPaginatedImportTests(unittest.TestCase):
                                        self.thread, [('/source/Nexus', str(self.project))])
         self.assertNotEqual(target.read_bytes(), original)
         self.assertTrue((backups / 'mock-update-pending.json').is_file())
+        journal = backups / 'mock-update-pending.json'
+        original_journal = journal.read_bytes()
+        altered = json.loads(original_journal)
+        altered['operations'][0]['after'] = '0' * 64
+        journal.write_text(json.dumps(altered))
+        with self.assertRaises(ns.SyncError):
+            importer.recover_pending(self.profile, self.shared, backups, self.key)
+        self.assertTrue(journal.exists())
+        journal.write_bytes(original_journal)
+        manifest = backups / 'latest' / 'manifest.json'
+        original_manifest = manifest.read_bytes()
+        changed_manifest = json.loads(original_manifest)
+        changed_manifest['files']['unrelated'] = '0' * 64
+        manifest.write_text(json.dumps(changed_manifest))
+        with self.assertRaises(ns.SyncError):
+            importer.recover_pending(self.profile, self.shared, backups, self.key)
+        self.assertTrue(journal.exists())
+        manifest.write_bytes(original_manifest)
+        other = backups / 'mock-child-pending.json'
+        other.write_text('{}')
+        interrupted = target.read_bytes()
+        with self.assertRaises(ns.SyncError):
+            importer.recover_pending(self.profile, self.shared, backups, self.key)
+        self.assertEqual(target.read_bytes(), interrupted)
+        self.assertTrue((backups / 'mock-update-pending.json').is_file())
+        other.unlink()
         importer.recover_pending(self.profile, self.shared, backups, self.key)
         self.assertEqual(target.read_bytes(), original)
         self.assertFalse((backups / 'mock-update-pending.json').exists())

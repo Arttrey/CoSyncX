@@ -6,6 +6,7 @@ system temporary directory and deliberately refuses existing thread IDs.
 from pathlib import Path
 from collections import Counter
 import hashlib
+import hmac
 import json
 import os
 import queue
@@ -313,8 +314,13 @@ def update_thread(source: Path, profile: Path, shared: Path, backup_root: Path, 
             title_index = profile / 'session_index.jsonl'
             if title_index.is_file() and not title_index.is_symlink():
                 backup_names.append(title_index.name)
-            latest = backup.replace_latest(profile, backup_root, backup_names)
             expected = {name: ns._digest(path) for name, path in old.items()}
+            def verify_backup(_stage, manifest):
+                for name, path in old.items():
+                    relative = path.relative_to(profile).as_posix()
+                    if ns._digest(path) != expected[name] or manifest.get(relative) != expected[name]:
+                        raise ns.SyncError('Mock history changed during backup')
+            latest = backup.replace_latest(profile, backup_root, backup_names, pre_commit=verify_backup)
             pending = []
             try:
                 for name in changed:
@@ -330,9 +336,12 @@ def update_thread(source: Path, profile: Path, shared: Path, backup_root: Path, 
                     item = next(item for item in incoming if item['path'].name == name)
                     operations.append({'path': item['path'].relative_to(prepared).as_posix(),
                                        'before': None, 'after': ns._digest(item['path'])})
+                recovery = {'version': 1, 'thread': thread_id, 'operations': operations,
+                            'backup_manifest_digest': ns._digest(latest / 'manifest.json')}
+                recovery['authentication'] = ns._manifest_tag(recovery, key)
                 fd = os.open(journal, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
                 with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-                    json.dump({'version': 1, 'thread': thread_id, 'operations': operations}, stream)
+                    json.dump(recovery, stream, sort_keys=True)
                     stream.flush()
                     os.fsync(stream.fileno())
                 if any(ns._digest(path) != expected[name] for name, path in old.items()):
@@ -367,6 +376,7 @@ def recover_pending(profile: Path, shared: Path, backup_root: Path, key: bytes) 
     journal, latest = backup_root / 'mock-update-pending.json', backup_root / 'latest'
     if journal.is_symlink() or not journal.is_file() or journal.stat().st_size > 1024 * 1024 or latest.is_symlink():
         raise ns.SyncError('Mock recovery journal unavailable')
+    mock_journal.ensure_clear(backup_root, except_name=journal.name)
     data = json.loads(journal.read_text(encoding='utf-8'))
     manifest_path = latest / 'manifest.json'
     if manifest_path.is_symlink() or not manifest_path.is_file() or manifest_path.stat().st_size > 1024 * 1024:
@@ -376,6 +386,10 @@ def recover_pending(profile: Path, shared: Path, backup_root: Path, key: bytes) 
             or not isinstance(data.get('operations'), list) or not data['operations']
             or not isinstance(manifest, dict) or not isinstance(manifest.get('files'), dict)):
         raise ns.SyncError('Invalid mock recovery data')
+    tag = data.get('authentication')
+    if (not isinstance(tag, str) or not hmac.compare_digest(tag, ns._manifest_tag(data, key))
+            or data.get('backup_manifest_digest') != ns._digest(manifest_path)):
+        raise ns.SyncError('Mock recovery journal or backup is not authenticated')
     with mock._mock_thread_lock(profile, data['thread']):
         checked = []
         for item in data['operations']:

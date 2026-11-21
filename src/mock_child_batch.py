@@ -172,9 +172,7 @@ def rollback(profile: Path, shared: Path, backup_root: Path, key: bytes) -> None
     if (journal.is_symlink() or not journal.is_file() or journal.stat().st_size > 1024 * 1024
             or latest.is_symlink() or not latest.is_dir()):
         raise ns.SyncError('Mock child recovery unavailable')
-    for name in mock_journal.PENDING:
-        if name != journal.name and ((backup_root / name).exists() or (backup_root / name).is_symlink()):
-            raise ns.SyncError('Another mock transaction needs recovery')
+    mock_journal.ensure_clear(backup_root, except_name=journal.name)
     data = json.loads(journal.read_bytes())
     if not isinstance(data, dict) or data.get('version') != 1:
         raise ns.SyncError('Invalid mock child journal')

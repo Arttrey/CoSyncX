@@ -16,7 +16,10 @@ class MockJournalTests(unittest.TestCase):
                 path.write_text('{}')
                 with self.assertRaises(ns.SyncError):
                     mock_journal.ensure_clear(root)
+                mock_journal.ensure_clear(root, except_name=name)
                 path.unlink()
+            with self.assertRaises(ns.SyncError):
+                mock_journal.ensure_clear(root, except_name='unknown')
 
 
 if __name__ == '__main__': unittest.main()

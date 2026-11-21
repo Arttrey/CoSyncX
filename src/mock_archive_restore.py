@@ -307,9 +307,7 @@ def rollback(profile: Path, shared: Path, backup_root: Path, key: bytes) -> None
     if (journal.is_symlink() or not journal.is_file() or journal.stat().st_size > 1024 * 1024
             or latest.is_symlink() or not latest.is_dir()):
         raise ns.SyncError('Mock archive recovery unavailable')
-    for other in ('mock-title-pending.json', 'mock-update-pending.json'):
-        if (backup_root / other).exists() or (backup_root / other).is_symlink():
-            raise ns.SyncError('Another mock recovery is pending')
+    mock_journal.ensure_clear(backup_root, except_name=journal.name)
     data = json.loads(journal.read_bytes())
     manifest_path = latest / 'manifest.json'
     if manifest_path.is_symlink() or not manifest_path.is_file() or manifest_path.stat().st_size > 1024 * 1024:
