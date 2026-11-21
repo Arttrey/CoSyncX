@@ -12,6 +12,21 @@ def status(sequence=1, **changes):
 
 
 class RestoreGateTests(unittest.TestCase):
+    def test_three_folders_require_graph_to_be_stable_too(self):
+        gate = MultiFolderGate(folder_ids=('chats', 'titles', 'graph'), peer_id='vps', quiet_seconds=2)
+        def observations(graph):
+            return {name: (name, value, True, 'valid') for name, value in
+                    (('chats', status()), ('titles', status()), ('graph', graph))}
+        self.assertIsNone(gate.observe(observations(status(needFiles=1)), now=0))
+        self.assertIsNone(gate.observe(observations(status()), now=1))
+        self.assertIsNone(gate.observe(observations(status(2)), now=2))
+        revision = gate.observe(observations(status(2)), now=4)
+        self.assertEqual(revision, (('chats', 1), ('titles', 1), ('graph', 2)))
+        result = {'state': 'RESTORED', 'indexed': True, 'changed_chats': 1}
+        with self.assertRaises(ValueError):
+            gate.complete(revision, result, after=observations(status(3)))
+        self.assertEqual(gate.complete(revision, result, after=observations(status(2)))['changed_chats'], 1)
+
     def test_two_folders_wait_for_titles_and_detect_title_only_changes(self):
         gate = MultiFolderGate(folder_ids=('chats', 'titles'), peer_id='vps', quiet_seconds=2)
         def observations(chats=None, titles=None, connected=True):
