@@ -12,7 +12,8 @@ def restore_status(path: Path) -> str | None:
     """Read a fresh private receiver status; never accept mock results."""
     value = read_status(path, mock_only=False)
     states = {'TRANSFERRING': 'TRANSFERRING', 'RESTORING': 'RESTORING',
-              'PENDING': 'PENDING', 'COMPLETE': 'RESTORED', 'ERROR': 'ERROR'}
+              'PENDING': 'PENDING', 'COMPLETE': 'RESTORED' if value and value.get('restore_event') else 'TRANSFERRED',
+              'ERROR': 'ERROR'}
     return states.get(value.get('state')) if value is not None else None
 
 

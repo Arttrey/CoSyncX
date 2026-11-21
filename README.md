@@ -19,9 +19,9 @@ does not use changes to the local Codex profile as a trigger. The gate refuses
 to produce a reload event without a separately confirmed successful restore
 and indexing. It is experimental, does not poll Syncthing by itself, and must
 not persist a remote sequence alone across Syncthing index resets.
-The direct-folder pipeline is currently limited to disposable mock profiles;
-it does not receive real chats. The optional macOS menu-bar status is read-only
-and reports Syncthing transfer progress, not successful restoration.
+The direct-folder pipeline is experimental; test it on disposable profiles
+before using real chats. The optional macOS menu-bar status is read-only and
+distinguishes Syncthing transfer from confirmed chat restoration.
 The `direct-watch --experimental` prototype handles new and active chats when
 Cursor and Codex are quiet, including a linear multi-page source when no other
 history references its physical pages. A differing source history or title is
@@ -37,9 +37,11 @@ sessions untouched. This is useful for a conversation continued on another
 device; changing its display name does not change its ID.
 When an individual writer lock is held, the receiver defers that conversation
 and its dependent sessions, processes eligible independent chats, and retries
-without requiring another Syncthing change. The current real-profile watcher
-still waits while Cursor or Codex is running; concurrent use has only been
-tested on disposable profiles.
+without requiring another Syncthing change. The experimental `--allow-active`
+option permits restoration while Cursor or Codex is open on macOS and Linux;
+it uses individual writer locks and has only been tested with disposable
+profiles. Recovery from an interrupted file-writing operation still waits for
+Cursor and Codex to close. Keep a backup before enabling concurrent use.
 An indexed restore keeps its reload event until the status is published. An
 interrupted indexing pass retains its authenticated metadata so it can finish
 before a newer source revision is processed, provided the local state has not

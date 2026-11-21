@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -15,6 +16,21 @@ from test_codex_contract import read_rpc_response, stop_server
 @unittest.skipUnless(os.environ.get('NEXUS_TEST_CODEX') == '1' and shutil.which('codex'), 'requires disposable Codex')
 class CodexQueueTests(unittest.TestCase):
     def test_busy_chat_waits_while_independent_chat_is_indexed(self):
+        self.exercise_queue(interrupt=None)
+
+    def test_interrupted_write_waits_for_active_codex_before_recovery(self):
+        self.exercise_queue(interrupt='write')
+
+    def test_interrupted_index_resumes_while_other_chat_is_open(self):
+        self.exercise_queue(interrupt='index')
+
+    def test_process_killed_during_index_resumes_with_open_chat(self):
+        self.exercise_queue(interrupt='kill-index')
+
+    def test_write_recovery_preserves_concurrent_database_changes(self):
+        self.exercise_queue(interrupt='write-concurrent-change')
+
+    def exercise_queue(self, interrupt):
         with tempfile.TemporaryDirectory(prefix='cosyncx-real-queue-') as tmp:
             root = Path(tmp).resolve()
             source, titles, graph, profile, backup, project = (root / x for x in
@@ -85,7 +101,8 @@ class CodexQueueTests(unittest.TestCase):
                 return response['result']
             receiver = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
                 backup_root=backup, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
-                codex=codex, folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0)
+                codex=codex, folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0,
+                allow_active=True)
             state = {'state': 'idle', 'sequence': 1, 'remoteSequence': {'vps': 1}, 'needFiles': 0,
                      'needDirectories': 0, 'needSymlinks': 0, 'needDeletes': 0, 'errors': 0, 'pullErrors': 0}
             def read(folder): return lambda: (folder, state, True, 'valid')
@@ -97,25 +114,83 @@ class CodexQueueTests(unittest.TestCase):
                 server.stdin.write(b'{"method":"initialized","params":{}}\n'); server.stdin.flush()
                 call(2, 'thread/resume', {'threadId': busy, 'path': str(target), 'cwd': str(project)})
                 busy_before = target.read_bytes()
-                with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True):
+                with patch('cosync_direct_restore.quiescence.is_quiet', return_value=False):
                     self.assertEqual(poll(0)['state'], 'WAITING')
-                    result = poll(1)
-                    self.assertEqual(result['state'], 'COMPLETE')
-                    self.assertEqual(result['restore_event']['changed_chats'], 1)
-                    self.assertEqual(receiver.pending_busy_ids, {busy})
-                    self.assertIn('updated message', free_target.read_text())
-                    receiver.acknowledge(result['restore_event'])
-                    self.assertEqual(poll(2)['state'], 'PENDING')
+                    if interrupt in ('write', 'write-concurrent-change'):
+                        original_replace = os.replace
+                        def replace_then_interrupt(src, dst, *args, **kwargs):
+                            result = original_replace(src, dst, *args, **kwargs)
+                            if Path(dst) == free_target:
+                                raise RuntimeError('simulated termination after history replacement')
+                            return result
+                        with patch('cosync_direct_restore.os.replace', side_effect=replace_then_interrupt):
+                            with self.assertRaises(RuntimeError):
+                                poll(1)
+                        self.assertEqual(json.loads((backup / 'direct-restore-pending.json').read_text())['phase'], 'writing')
+                        self.assertEqual(poll(2)['state'], 'PENDING')
+                        self.assertEqual(target.read_bytes(), busy_before)
+                        self.assertIn('test message', json.dumps(call(4, 'thread/turns/list',
+                                                                     {'threadId': busy, 'itemsView': 'full'})))
+                        if interrupt == 'write-concurrent-change':
+                            call(5, 'thread/name/set', {'threadId': busy, 'name': 'changed while restoring'})
+                            changed_index = (profile / 'session_index.jsonl').read_bytes()
+                            self.assertIn(b'changed while restoring', changed_index)
+                    else:
+                        if interrupt == 'kill-index':
+                            worker = '''
+import json, os, sys
+from pathlib import Path
+from unittest.mock import patch
+from cosync_direct_restore import DirectReceiver
+args=json.loads(sys.argv[1])
+source,titles,graph,profile,backup,project,codex=map(Path,args)
+receiver=DirectReceiver(source=source,titles=titles,graph=graph,profile=profile,backup_root=backup,
+    key=b'k'*32,mappings=[('/source/Nexus',str(project))],codex=codex,
+    folder_ids=('sessions','titles','graph'),peer_id='vps',quiet_seconds=0,allow_active=True)
+state={'state':'idle','sequence':1,'remoteSequence':{'vps':1},'needFiles':0,'needDirectories':0,
+       'needSymlinks':0,'needDeletes':0,'errors':0,'pullErrors':0}
+def read(name): return lambda:(name,state,True,'valid')
+readers=[read(name) for name in ('sessions','titles','graph')]
+def poll(n): return receiver.poll(readers[0],title_status_reader=readers[1],graph_status_reader=readers[2],now=n)
+poll(0)
+with patch('cosync_direct_restore.indexer._index_profile', side_effect=lambda *a,**kw: os._exit(42)):
+    poll(1)
+raise SystemExit(1)
+'''
+                            paths = [str(x) for x in (source, titles, graph, profile, backup, project, codex)]
+                            killed = subprocess.run([sys.executable, '-c', worker, json.dumps(paths)],
+                                                    capture_output=True, timeout=30)
+                            self.assertEqual(killed.returncode, 42, killed.stderr.decode())
+                            self.assertEqual(json.loads((backup / 'direct-restore-pending.json').read_text())['phase'], 'indexing')
+                        if interrupt == 'index':
+                            with patch('cosync_direct_restore.indexer._index_profile', side_effect=RuntimeError('simulated indexing failure')):
+                                with self.assertRaises(RuntimeError):
+                                    poll(1)
+                            self.assertEqual(json.loads((backup / 'direct-restore-pending.json').read_text())['phase'], 'indexing')
+                        result = poll(1)
+                        self.assertEqual(result['state'], 'PENDING')
+                        self.assertEqual(result['restore_event']['changed_chats'], 1)
+                        self.assertEqual(receiver.pending_busy_ids, {busy})
+                        self.assertIn('updated message', free_target.read_text())
+                        receiver.acknowledge(result['restore_event'])
+                        self.assertEqual(poll(2)['state'], 'PENDING')
                 self.assertIn(busy, call(3, 'thread/loaded/list', {})['data'])
-                self.assertEqual(target.read_bytes(), busy_before)
+                if interrupt != 'write-concurrent-change':
+                    self.assertEqual(target.read_bytes(), busy_before)
                 self.assertIn('test message', json.dumps(call(4, 'thread/turns/list',
                                                              {'threadId': busy, 'itemsView': 'full'})))
             finally:
                 stop_server(server)
-            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True):
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=interrupt in ('write', 'write-concurrent-change')):
                 result = poll(3)
+                if interrupt == 'write-concurrent-change':
+                    self.assertEqual(result['state'], 'PENDING')
+                    self.assertTrue((backup / 'direct-restore-pending.json').is_file())
+                    self.assertEqual((profile / 'session_index.jsonl').read_bytes(), changed_index)
+                    return
                 self.assertEqual(result['state'], 'COMPLETE')
-                self.assertEqual(result['restore_event']['changed_chats'], 1)
+                self.assertEqual(result['restore_event']['changed_chats'], 2 if interrupt == 'write' else 1)
+                self.assertIn('updated message', free_target.read_text())
                 receiver.acknowledge(result['restore_event'])
 
 

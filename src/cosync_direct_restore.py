@@ -1,7 +1,7 @@
 """Guarded direct-folder receiver for active chats.
 
 Archived IDs stay archived. Existing active versions are backed up before
-replacement. No profile write is attempted while Codex or Cursor runs.
+replacement. Concurrent mode must be explicitly enabled.
 """
 import argparse
 from contextlib import closing
@@ -36,7 +36,7 @@ import nexus_sync as ns
 class DirectReceiver:
     def __init__(self, *, source: Path, titles: Path, graph: Path, profile: Path, backup_root: Path,
                  key: bytes, mappings: list[tuple[str, str]], codex: Path, folder_ids: tuple[str, str, str],
-                 peer_id: str, quiet_seconds: float = 5, excluded_thread_ids=()):
+                 peer_id: str, quiet_seconds: float = 5, excluded_thread_ids=(), allow_active: bool = False):
         paths = [Path(x).resolve(strict=True) for x in (source, titles, graph, profile, backup_root)]
         if any(not p.is_dir() for p in paths) or len(key) != 32 or not mappings:
             raise ns.SyncError('Invalid direct receiver configuration')
@@ -58,6 +58,9 @@ class DirectReceiver:
                 or any(not graph_schema._uuid(identity) for identity in excluded_thread_ids)):
             raise ns.SyncError('Invalid excluded thread IDs')
         self.excluded_thread_ids = frozenset(excluded_thread_ids)
+        if type(allow_active) is not bool or (allow_active and sys.platform not in ('darwin', 'linux')):
+            raise ns.SyncError('Concurrent restore is unavailable on this platform')
+        self.allow_active = allow_active
         self.codex = Path(codex).resolve(strict=True)
         if not self.codex.is_file():
             raise ns.SyncError('Codex executable unavailable')
@@ -80,6 +83,9 @@ class DirectReceiver:
                         self.path_warning_count = len(value['chats'])
                 except (ValueError, TypeError, AttributeError):
                     pass
+
+    def _write_allowed(self):
+        return self.allow_active or quiescence.is_quiet()
 
     def _write_path_report(self, reports):
         """Keep missing local paths private and available across restarts."""
@@ -222,7 +228,7 @@ class DirectReceiver:
                 return None
         for index in range(offset, len(queue)):
             identity, title = queue[index]
-            if not quiescence.is_quiet():
+            if not self._write_allowed():
                 return None
             indexer._index_profile(self.profile, identity, self.codex, title=title, allow_title_change=True,
                                    ignore_busy=self._ignored_busy)
@@ -240,7 +246,7 @@ class DirectReceiver:
         if set(verified) != set(incoming):
             return None
         if edges:
-            if not quiescence.is_quiet():
+            if not self._write_allowed():
                 return None
             with tempfile.TemporaryDirectory(prefix='cosyncx-active-graph-') as tmp:
                 filtered = Path(tmp) / 'graph.json'
@@ -416,6 +422,7 @@ class DirectReceiver:
         # Codex can mark a thread archived in SQLite before or without moving
         # its history file. Such a thread and its children must stay local.
         database = self.profile / 'state_5.sqlite'
+        indexed_ids = set()
         if database.is_symlink():
             return None
         if database.is_file() and set(incoming) - skipped:
@@ -424,19 +431,25 @@ class DirectReceiver:
                 return None
             try:
                 with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as db:
-                    archived_ids = {row[0] for row in db.execute('SELECT id FROM threads WHERE archived = 1')}
+                    rows = db.execute('SELECT id, archived FROM threads').fetchall()
+                    indexed_ids = {row[0] for row in rows}
+                    archived_ids = {row[0] for row in rows if row[1] == 1}
             except sqlite3.Error:
                 return None
             skipped.update(set(incoming) & archived_ids)
         self.unresolved_archived_count = sum(identity in skipped and identity not in self.excluded_thread_ids
                                              and source_kinds[identity] == 'chat' for identity in incoming)
-        self.pending_busy_ids = frozenset()
+        # An indexed thread without its local history cannot safely be treated
+        # as a new thread. Defer it and its descendants, not the whole batch.
+        orphan_ids = (set(incoming) - skipped) & indexed_ids - set(local)
+        skipped.update(orphan_ids)
+        self.pending_busy_ids = frozenset(orphan_ids)
         self._ignored_busy = frozenset()
         if set(incoming) - skipped:
             try:
-                if quiescence.is_quiet():
+                if self._write_allowed():
                     self._ignored_busy = frozenset(locking._busy_thread_ids(self.profile))
-                    self.pending_busy_ids = frozenset((set(incoming) - skipped) & self._ignored_busy)
+                    self.pending_busy_ids |= frozenset((set(incoming) - skipped) & self._ignored_busy)
                     skipped.update(self.pending_busy_ids)
             except (quiescence.QuiescenceError, locking.MockChatBusy, FileNotFoundError):
                 return None
@@ -566,7 +579,7 @@ class DirectReceiver:
                     if (len(current) != 1 or current[0]['folder'] != 'sessions' or not isinstance(item, dict)
                             or item.get('digest') != ns._digest(current[0]['path'])):
                         return None
-                    if not quiescence.is_quiet():
+                    if not self._write_allowed():
                         return None
                     indexer._index_profile(self.profile, identity, self.codex, title=item.get('title'),
                                            ignore_busy=self._ignored_busy)
@@ -597,7 +610,7 @@ class DirectReceiver:
                         or item.get('digest') != ns._digest(current[0]['path'])
                         or item.get('title') != (names.get(identity) if kinds.get(identity) == 'chat' else None)):
                     return None
-                if not quiescence.is_quiet():
+                if not self._write_allowed():
                     return None
                 indexer._index_profile(self.profile, identity, self.codex, title=item['title'],
                                        ignore_busy=self._ignored_busy)
@@ -710,12 +723,12 @@ class DirectReceiver:
             selection += [path.relative_to(self.profile).as_posix() for _, path, _, _, _, _ in recheck]
             lock_id = prepared[0][0] if prepared else (recheck[0][0] if recheck else sorted(graph_changed)[0])
             try:
-                if not quiescence.is_quiet():
+                if not self._write_allowed():
                     return None
             except quiescence.QuiescenceError:
                 return None
             with locking._mock_thread_lock(self.profile, lock_id, ignore_busy=self._ignored_busy):
-                if not quiescence.is_quiet():
+                if not self._write_allowed():
                     return None
                 current_ids = ns._chat_catalog(self.profile, include_unsupported=True)
                 if any(identity in current_ids for identity, _, _, _ in prepared):
@@ -734,7 +747,7 @@ class DirectReceiver:
                         if ns._digest(path) != digest or manifest.get(relative) != digest:
                             raise ns.SyncError('Direct history changed during backup')
                 latest = backup.replace_latest(self.profile, self.backup_root, selection, pre_commit=verify_backup)
-                if not quiescence.is_quiet():
+                if not self._write_allowed():
                     return None
                 if path_reports:
                     self._write_path_report(path_reports)
@@ -762,7 +775,7 @@ class DirectReceiver:
                     json.dump(record, stream, sort_keys=True)
                     stream.flush(); os.fsync(stream.fileno())
                 for _, staged, relative, _ in prepared:
-                    if not quiescence.is_quiet():
+                    if not self._write_allowed():
                         raise ns.SyncError('Codex started during direct restore')
                     parent = self.profile
                     for part in relative.parts[:-1]:
@@ -776,7 +789,7 @@ class DirectReceiver:
                     temporary = parent / ('.cosyncx-' + os.urandom(12).hex())
                     try:
                         ns._copy_stable_chat(staged, temporary)
-                        if not quiescence.is_quiet():
+                        if not self._write_allowed():
                             raise ns.SyncError('Codex started during direct restore')
                         os.link(temporary, target, follow_symlinks=False)
                     finally:
@@ -784,21 +797,21 @@ class DirectReceiver:
                 for _, target, _, original_digest, replacement, _ in recheck:
                     if replacement is None:
                         continue
-                    if not quiescence.is_quiet():
+                    if not self._write_allowed():
                         raise ns.SyncError('Codex started during direct restore')
                     if target.is_symlink() or not target.is_file() or ns._digest(target) != original_digest:
                         raise ns.SyncError('Direct history changed after backup')
                     temporary = target.with_name('.cosyncx-' + os.urandom(12).hex())
                     try:
                         ns._copy_stable_chat(replacement, temporary)
-                        if not quiescence.is_quiet():
+                        if not self._write_allowed():
                             raise ns.SyncError('Codex started during direct restore')
                         os.replace(temporary, target)
                     finally:
                         temporary.unlink(missing_ok=True)
             for identity, _, _, _, replacement, _ in recheck:
                 if replacement is not None:
-                    if not quiescence.is_quiet():
+                    if not self._write_allowed():
                         raise ns.SyncError('Codex started during direct restore')
                     indexer._reset_profile_projection(self.profile, self.backup_root, identity,
                                                       ignore_busy=self._ignored_busy)
@@ -860,9 +873,10 @@ class DirectReceiver:
             if not carry and (not record or record.get('phase') != 'indexed'):
                 raise ns.SyncError('Direct restore confirmation unavailable')
             event['id'] = carry[0]['id'] if carry else record['event_id']
-        if event is None and (self.unresolved_archived_count or self.pending_busy_ids):
-            return {'state': 'PENDING', 'mock_only': False}
-        result = {'state': 'COMPLETE', 'mock_only': False, 'restore_event': event}
+        state = 'PENDING' if self.unresolved_archived_count or self.pending_busy_ids else 'COMPLETE'
+        if self.pending_busy_ids:
+            self.gate.request_retry()
+        result = {'state': state, 'mock_only': False, 'restore_event': event}
         if carry or (record and record.get('phase') == 'indexed'):
             result['acknowledge_required'] = True
             self.pending_result = result
@@ -880,6 +894,8 @@ def main(argv=None):
     parser.add_argument('--interval', type=float, default=5)
     parser.add_argument('--exclude-thread-id', action='append', default=[],
                         help='keep this local chat and its dependent sessions unchanged')
+    parser.add_argument('--allow-active', action='store_true',
+                        help='allow experimental restores while Cursor or Codex is running')
     parser.add_argument('--experimental', action='store_true', required=True,
                         help='enable the incomplete prototype on a disposable profile')
     args = parser.parse_args(argv)
@@ -889,7 +905,7 @@ def main(argv=None):
         receiver = DirectReceiver(source=args.source, titles=args.titles, graph=args.graph, profile=args.profile,
             backup_root=args.backup_root, key=key, mappings=args.map_root, codex=args.codex,
             folder_ids=(args.sessions_folder_id, args.titles_folder_id, args.graph_folder_id), peer_id=args.peer_id,
-            excluded_thread_ids=args.exclude_thread_id)
+            excluded_thread_ids=args.exclude_thread_id, allow_active=args.allow_active)
         sources = [cosync_syncthing_watch.SyncthingSource(client, folder, args.peer_id, path) for folder, path in (
             (args.sessions_folder_id, args.source / 'sessions'), (args.titles_folder_id, args.titles),
             (args.graph_folder_id, args.graph))]

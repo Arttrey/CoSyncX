@@ -78,6 +78,20 @@ class ConcurrentImportTests(unittest.TestCase):
                 self.assertEqual(paths[0].read_bytes(), existing_before)
                 old_items = call(first, 6, 'thread/items/list', {'threadId': ids[0], 'limit': 100})
                 self.assertIn('existing conversation', json.dumps(old_items))
+                received_bytes = paths[1].read_bytes()
+                call(second, 6, 'thread/archive', {'threadId': ids[1]})
+                call(second, 7, 'thread/delete', {'threadId': ids[1]})
+                self.assertFalse(any((home / 'archived_sessions').rglob('*' + ids[1] + '*.jsonl')))
+                listing = call(first, 7, 'thread/list', {'limit': 100, 'useStateDbOnly': True})
+                self.assertNotIn(ids[1], {item['id'] for item in listing['data']})
+                self.assertEqual(paths[0].read_bytes(), existing_before)
+                self.assertIn('existing conversation', json.dumps(call(first, 8, 'thread/items/list',
+                    {'threadId': ids[0], 'limit': 100})))
+                paths[1].parent.mkdir(parents=True, exist_ok=True)
+                paths[1].write_bytes(received_bytes)
+                call(second, 8, 'thread/resume', {'threadId': ids[1], 'path': str(paths[1]), 'cwd': str(project)})
+                self.assertIn('received conversation', json.dumps(call(second, 9, 'thread/items/list',
+                    {'threadId': ids[1], 'limit': 100})))
             finally:
                 for server in reversed(servers):
                     stop_server(server)

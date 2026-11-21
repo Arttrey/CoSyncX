@@ -37,12 +37,12 @@ class RestoreSupervisor:
             if not isinstance(result, dict) or result.get('mock_only') is not self.mock_only:
                 raise ValueError('Receiver mode mismatch')
             state, event = result.get('state'), result.get('restore_event')
-            if state == 'COMPLETE':
+            if state in ('COMPLETE', 'PENDING'):
                 if event is not None:
                     if not status._valid_event(event, self.mock_only):
                         raise ValueError('Invalid restore confirmation')
                     self.last_event = event
-                self._publish('COMPLETE')
+                self._publish(state)
                 if ((event is not None or result.get('acknowledge_required') is True)
                         and callable(getattr(self.receiver, 'acknowledge', None))):
                     self.receiver.acknowledge(event)
@@ -50,7 +50,7 @@ class RestoreSupervisor:
                 if event is not None:
                     raise ValueError('Unexpected restore event')
                 self._publish('COMPLETE')
-            elif state in ('WAITING', 'PENDING'):
+            elif state == 'WAITING':
                 if event is not None:
                     raise ValueError('Unexpected restore event')
                 self._publish('PENDING')

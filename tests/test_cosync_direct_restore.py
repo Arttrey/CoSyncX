@@ -27,7 +27,8 @@ class DirectRestoreTests(unittest.TestCase):
             incoming = source / 'sessions'; incoming.mkdir()
             busy, free = ('019b0000-0000-7000-8000-0000000000d1', '019b0000-0000-7000-8000-0000000000d2')
             child = '019b0000-0000-7000-8000-0000000000d3'
-            for identity in (busy, free, child):
+            orphan = '019b0000-0000-7000-8000-0000000000d4'
+            for identity in (busy, free, child, orphan):
                 meta = {'id': identity, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': '/source/Nexus',
                         'originator': 'codex_vscode', 'cli_version': '0.1.0', 'source': 'vscode',
                         'model_provider': 'openai', 'history_mode': 'paginated'}
@@ -36,13 +37,14 @@ class DirectRestoreTests(unittest.TestCase):
                 (incoming / f'rollout-2026-01-01T00-00-00-{identity}.jsonl').write_text(json.dumps(
                     {'timestamp': meta['timestamp'], 'type': 'session_meta', 'payload': meta, 'ordinal': 0}) + '\n')
             (titles / 'session_index.jsonl').write_text(''.join(
-                json.dumps({'id': identity, 'thread_name': 'test'}) + '\n' for identity in (busy, free)))
+                json.dumps({'id': identity, 'thread_name': 'test'}) + '\n' for identity in (busy, free, orphan)))
             (graph / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1',
                 'edges': [{'parent': busy, 'child': child, 'status': 'closed'}],
                 'omitted_missing': 0, 'omitted_archived': 0}))
             with sqlite3.connect(profile / 'state_5.sqlite') as db:
                 db.execute('CREATE TABLE threads (id TEXT, archived INTEGER)')
                 db.execute('CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT, status TEXT)')
+                db.execute('INSERT INTO threads VALUES (?, 0)', (orphan,))
             lockdir = profile / 'thread-writer-locks'; lockdir.mkdir()
             (lockdir / '.coordination.lock').touch()
             receiver = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
@@ -64,21 +66,32 @@ class DirectRestoreTests(unittest.TestCase):
                     fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                     self.assertEqual(poll(0)['state'], 'WAITING')
                     first = poll(1)
-                    self.assertEqual(first['state'], 'COMPLETE')
+                    self.assertEqual(first['state'], 'PENDING')
                     self.assertEqual(first['restore_event']['changed_chats'], 1)
                     self.assertEqual(indexer.call_args.args[1], free)
                     self.assertNotIn(busy, ns._chat_catalog(profile, include_unsupported=True))
                     self.assertNotIn(child, ns._chat_catalog(profile, include_unsupported=True))
+                    self.assertNotIn(orphan, ns._chat_catalog(profile, include_unsupported=True))
                     apply_graph.assert_not_called()
                     receiver.acknowledge(first['restore_event'])
                     self.assertEqual(poll(2)['state'], 'PENDING')
                 second = poll(3)
-                self.assertEqual(second['state'], 'COMPLETE')
+                self.assertEqual(second['state'], 'PENDING')
                 self.assertEqual(second['restore_event']['changed_chats'], 2)
                 self.assertEqual([call.args[1] for call in indexer.call_args_list], [free, busy, child])
                 apply_graph.assert_called_once()
                 receiver.acknowledge(second['restore_event'])
-            self.assertEqual(set(ns._chat_catalog(profile, include_unsupported=True)), {busy, free, child})
+                deferred = poll(4)
+                self.assertEqual(deferred['state'], 'PENDING')
+                if deferred.get('acknowledge_required'):
+                    receiver.acknowledge(deferred.get('restore_event'))
+                with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                    db.execute('DELETE FROM threads WHERE id=?', (orphan,))
+                third = poll(5)
+                self.assertEqual(third['state'], 'COMPLETE')
+                self.assertGreaterEqual(third['restore_event']['changed_chats'], 1)
+                receiver.acknowledge(third['restore_event'])
+            self.assertEqual(set(ns._chat_catalog(profile, include_unsupported=True)), {busy, free, child, orphan})
 
     def test_active_source_archived_locally_does_not_report_complete(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-pending-archived-') as tmp:

@@ -6,12 +6,16 @@ class StatusApp: NSObject, NSApplicationDelegate {
     private var item: NSStatusItem!
     private var timer: Timer?
     private var checking = false
+    private var detail: NSMenuItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "CoSyncX: проверка"
+        item.button?.title = "CoSyncX: checking"
         let menu = NSMenu()
-        let quit = NSMenuItem(title: "Закрыть CoSyncX Status", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        detail = NSMenuItem(title: "Checking chat status", action: nil, keyEquivalent: "")
+        menu.addItem(detail)
+        menu.addItem(NSMenuItem.separator())
+        let quit = NSMenuItem(title: "Quit CoSyncX Status", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
         item.menu = menu
         refresh()
@@ -38,15 +42,20 @@ class StatusApp: NSObject, NSApplicationDelegate {
                    let value = json["state"] as? String { state = value }
             } catch { }
             DispatchQueue.main.async {
-                let labels = ["TRANSFERRING": "CoSyncX: передача", "TRANSFERRED": "CoSyncX: ожидают восстановления",
-                              "RESTORING": "CoSyncX: восстановление", "RESTORED": "CoSyncX: восстановлено",
-                              "PENDING": "CoSyncX: ожидание",
-                              "DISCONNECTED": "CoSyncX: VPS недоступен", "ERROR": "CoSyncX: ошибка Syncthing",
-                              "UNAVAILABLE": "CoSyncX: нет связи с Syncthing"]
-                self.item.button?.title = labels[state] ?? labels["UNAVAILABLE"]!
-                self.item.button?.toolTip = state == "RESTORED"
-                    ? "CoSyncX подтвердил восстановление и индексацию чатов."
-                    : "Статус передачи чатов; восстановление и индексация не подтверждены."
+                let labels: [String: (String, String)] = [
+                    "TRANSFERRING": ("CoSyncX: transferring", "Chat files are being transferred through Syncthing."),
+                    "TRANSFERRED": ("CoSyncX: files received", "Transfer complete; chat restoration is not confirmed."),
+                    "RESTORING": ("CoSyncX: restoring", "CoSyncX is restoring chats and updating their index."),
+                    "RESTORED": ("CoSyncX: restored", "Chat restoration and indexing have been confirmed."),
+                    "PENDING": ("CoSyncX: awaiting restore", "Restoration is pending, for example while Cursor is open or a chat conflict needs attention."),
+                    "DISCONNECTED": ("CoSyncX: VPS offline", "The device sending chats is disconnected."),
+                    "ERROR": ("CoSyncX: error", "Check Syncthing and the restoration service."),
+                    "UNAVAILABLE": ("CoSyncX: unavailable", "Unable to read the Syncthing status.")
+                ]
+                let label = labels[state] ?? labels["UNAVAILABLE"]!
+                self.item.button?.title = label.0
+                self.item.button?.toolTip = label.1
+                self.detail.title = label.1
                 self.checking = false
             }
         }

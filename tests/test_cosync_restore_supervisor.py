@@ -12,6 +12,9 @@ class RestoreSupervisorTests(unittest.TestCase):
             path = Path(tmp).resolve() / 'status.json'
             class Receiver:
                 result = {'state': 'WAITING', 'mock_only': False}
+                acknowledged = []
+                def acknowledge(self, event):
+                    self.acknowledged.append(event)
                 def poll(self, _reader, **kwargs):
                     if self.result['state'] == 'COMPLETE':
                         kwargs['on_restore']()
@@ -34,11 +37,18 @@ class RestoreSupervisorTests(unittest.TestCase):
             saved = json.loads(path.read_text())
             self.assertEqual(receiver.during, 'RESTORING')
             self.assertEqual(saved['restore_event'], event)
+            partial = {**event, 'id': 'c' * 32, 'changed_chats': 1}
+            receiver.result = {'state': 'PENDING', 'mock_only': False, 'restore_event': partial}
+            supervisor.tick()
+            saved = json.loads(path.read_text())
+            self.assertEqual(saved['state'], 'PENDING')
+            self.assertEqual(saved['restore_event'], partial)
+            self.assertEqual(receiver.acknowledged[-1], partial)
             receiver.result = {'state': 'PENDING', 'mock_only': False}
             supervisor.tick()
             saved = json.loads(path.read_text())
             self.assertEqual(saved['state'], 'PENDING')
-            self.assertEqual(saved['restore_event'], event)
+            self.assertEqual(saved['restore_event'], partial)
             receiver.path_warning_count = 2
             receiver.backup_root = path.parent
             supervisor.tick()
