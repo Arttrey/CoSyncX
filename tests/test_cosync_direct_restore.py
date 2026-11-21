@@ -651,8 +651,21 @@ class DirectRestoreTests(unittest.TestCase):
             # indexing pass, even when the source changes before it finishes.
             with (graph / 'graph.json').open('a') as output:
                 output.write('\n')
+            state = {'state': 'idle', 'sequence': 2, 'remoteSequence': {'vps': 2}, 'needFiles': 0,
+                     'needDirectories': 0, 'needSymlinks': 0, 'needDeletes': 0, 'errors': 0, 'pullErrors': 0}
+            def read(folder): return lambda: (folder, state, True, 'valid')
+            readers = (read('sessions'), read('titles'), read('graph'))
+            status_path = root / 'restore-status.json'
+            supervisor = RestoreSupervisor(receiver, readers[0], status_path, mock_only=False,
+                                           title_reader=readers[1], graph_reader=readers[2])
             with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True):
-                self.assertEqual(receiver._receive(), 0)
+                self.assertEqual(supervisor.tick()['state'], 'WAITING')
+                self.assertEqual(supervisor.tick()['state'], 'COMPLETE')
+            status = json.loads(status_path.read_text())
+            self.assertEqual(status['restore_event']['id'], event_id)
+            self.assertTrue(status['restore_event']['indexed'])
+            self.assertEqual(status['restore_event']['changed_chats'], 1)
+            self.assertEqual(status['missing_path_chats'], 1)
             with sqlite3.connect(profile / 'state_5.sqlite') as db:
                 row = db.execute('SELECT archived FROM threads WHERE id=?', (thread,)).fetchone()
             self.assertEqual(row, (0,))
@@ -660,8 +673,7 @@ class DirectRestoreTests(unittest.TestCase):
             self.assertEqual(json.loads((backups / 'missing-paths.json').read_text())['chats'][thread]
                              ['unmapped_working_directories'], ['/source/missing-project'])
             self.assertFalse(journal.exists())
-            self.assertEqual(receiver._read_carry(), [{'id': event_id, 'count': 1}])
-            receiver.acknowledge({'id': event_id, 'indexed': True, 'changed_chats': 1})
+            self.assertEqual(receiver._read_carry(), [])
             target = profile / history.relative_to(source)
             original = target.read_bytes()
             existing = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
