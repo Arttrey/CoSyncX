@@ -34,9 +34,11 @@ class ArchivedRestoreContractTests(unittest.TestCase):
             project.mkdir()
             parent = '019b0000-0000-7000-8000-000000000001'
             child = '019b0000-0000-7000-8000-000000000002'
+            grandchild = '019b0000-0000-7000-8000-000000000003'
             paths = {}
             for identity, source, parent_id in ((parent, 'vscode', None),
-                    (child, {'subagent': {'other': 'guardian'}}, parent)):
+                    (child, {'subagent': {'other': 'guardian'}}, parent),
+                    (grandchild, {'subagent': {'other': 'guardian'}}, child)):
                 rows = [{'timestamp': '2026-01-01T00:00:00.000Z', 'type': 'session_meta',
                          'payload': {'id': identity, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': str(project),
                                      'originator': 'codex_vscode', 'cli_version': '0.1.0', 'source': source,
@@ -66,25 +68,27 @@ class ArchivedRestoreContractTests(unittest.TestCase):
                 return server
             server = start()
             try:
-                for number, identity in enumerate((parent, child), 2):
+                for number, identity in enumerate((parent, child, grandchild), 2):
                     call(server, number, 'thread/resume', {'threadId': identity, 'path': str(paths[identity]), 'cwd': str(project)})
             finally:
                 stop_server(server)
             with sqlite3.connect(profile / 'state_5.sqlite') as db:
                 db.execute('INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id, status) VALUES (?, ?, ?)',
                            (parent, child, 'closed'))
+                db.execute('INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id, status) VALUES (?, ?, ?)',
+                           (child, grandchild, 'closed'))
             server = start()
             try:
                 call(server, 2, 'thread/archive', {'threadId': parent})
             finally:
                 stop_server(server)
             with sqlite3.connect(profile / 'state_5.sqlite') as db:
-                states = dict(db.execute('SELECT id, archived FROM threads WHERE id IN (?,?)', (parent, child)))
-            self.assertEqual(states, {parent: 1, child: 1})
+                states = dict(db.execute('SELECT id, archived FROM threads WHERE id IN (?,?,?)', (parent, child, grandchild)))
+            self.assertEqual(states, {parent: 1, child: 1, grandchild: 1})
             impact = cosync_archive_plan.archive_impact(profile, [parent])
-            self.assertEqual(impact['threads'], {parent, child})
-            self.assertEqual(impact['archived'], 2)
-            self.assertEqual(len(impact['files']), 2)
+            self.assertEqual(impact['threads'], {parent, child, grandchild})
+            self.assertEqual(impact['archived'], 3)
+            self.assertEqual(len(impact['files']), 3)
             incoming = root / 'incoming'
             incoming.mkdir()
             with self.assertRaises(nexus_sync.SyncError):
@@ -92,7 +96,7 @@ class ArchivedRestoreContractTests(unittest.TestCase):
                     [('/source/Nexus', str(project))], Path(shutil.which('codex')))
             self.assertFalse((backups / 'mock-archive-pending.json').exists())
             prepared = mock_archive_backup.prepare(profile, shared, backups, key, [parent])
-            self.assertEqual(prepared['threads'], 2)
+            self.assertEqual(prepared['threads'], 3)
             manifest = json.loads((backups / 'latest' / 'manifest.json').read_text())['files']
             self.assertTrue(set(impact['files']) <= set(manifest))
             self.assertIn('state_5.sqlite', manifest)
@@ -113,14 +117,44 @@ class ArchivedRestoreContractTests(unittest.TestCase):
                     mock_archive_backup.prepare(profile, shared, backups, key, [parent])
             self.assertEqual((backups / 'latest' / impact['files'][0]).read_bytes(), previous)
             history.write_bytes(original)
+            (incoming / 'sessions').mkdir()
+            local_catalog = nexus_sync._chat_catalog(profile, include_unsupported=True)
+            parent_file = local_catalog[parent][0]['path']
+            shutil.copyfile(parent_file, incoming / 'sessions' / parent_file.name)
+            args = (incoming, profile, shared, backups, key, parent,
+                    [(str(project), str(project))], Path(shutil.which('codex')))
+            child_file = local_catalog[child][0]['path']
+            source_child = incoming / 'sessions' / child_file.name
+            shutil.copyfile(child_file, source_child)
+            with self.assertRaises(nexus_sync.SyncError):
+                mock_archive_restore.restore(*args)
+            self.assertFalse((backups / 'mock-archive-pending.json').exists())
+            source_child.unlink()
+            with patch.object(mock_archive_restore.pages, 'reset_mock_projection',
+                              side_effect=nexus_sync.SyncError('test group interruption')):
+                with self.assertRaises(nexus_sync.SyncError):
+                    mock_archive_restore.restore(*args)
+            mock_archive_restore.rollback(profile, shared, backups, key)
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                states = dict(db.execute('SELECT id, archived FROM threads WHERE id IN (?,?,?)', (parent, child, grandchild)))
+            self.assertEqual(states, {parent: 1, child: 1, grandchild: 1})
+            mock_archive_restore.restore(*args)
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                states = dict(db.execute('SELECT id, archived FROM threads WHERE id IN (?,?,?)', (parent, child, grandchild)))
+            self.assertEqual(states, {parent: 0, child: 1, grandchild: 1})
+            server = start()
+            try:
+                call(server, 2, 'thread/archive', {'threadId': parent})
+            finally:
+                stop_server(server)
             server = start()
             try:
                 call(server, 2, 'thread/unarchive', {'threadId': parent})
             finally:
                 stop_server(server)
             with sqlite3.connect(profile / 'state_5.sqlite') as db:
-                states = dict(db.execute('SELECT id, archived FROM threads WHERE id IN (?,?)', (parent, child)))
-            self.assertEqual(states, {parent: 0, child: 0})
+                states = dict(db.execute('SELECT id, archived FROM threads WHERE id IN (?,?,?)', (parent, child, grandchild)))
+            self.assertEqual(states, {parent: 0, child: 0, grandchild: 0})
 
     def test_backup_unarchive_and_resume_remote_history(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-archive-contract-') as tmp:

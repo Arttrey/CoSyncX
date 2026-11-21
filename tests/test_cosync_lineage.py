@@ -60,5 +60,33 @@ class LineageTests(unittest.TestCase):
             lineage.prepare_lineage(self.source, target, self.thread, [('c:\\Neurocity', str(self.nexus))])
         self.assertFalse(target.exists())
 
+    def test_already_local_cwd_must_resolve_inside_configured_root(self):
+        local_project = self.nexus / 'project'
+        local_project.mkdir()
+        root_page = self._write(cwd=str(local_project))
+        target = self.root / 'prepared-local'
+        self.assertEqual(lineage.prepare_lineage(self.source, target, self.thread,
+                                                 [('/foreign/Nexus', str(self.nexus))]), 1)
+        row = json.loads((target / root_page.relative_to(self.source)).read_text().splitlines()[0])
+        self.assertEqual(row['payload']['cwd'], str(local_project))
+        with self.assertRaises(ns.SyncError):
+            lineage._map_cwd(str(self.root), [('/foreign/Nexus', str(self.nexus))])
+        link = self.nexus / 'outside'
+        link.symlink_to(self.root, target_is_directory=True)
+        with self.assertRaises(ns.SyncError):
+            lineage._map_cwd(str(link), [('/foreign/Nexus', str(self.nexus))])
+
+    def test_prepares_large_bounded_record_without_rewriting_history(self):
+        root_page = self._write()
+        large = {'type': 'response_item', 'payload': {'text': 'x' * (17 * 1024 * 1024)}, 'ordinal': 2}
+        with root_page.open('a', encoding='utf-8') as out:
+            out.write(json.dumps(large) + '\n')
+        destination = self.root / 'large-prepared'
+        self.assertEqual(lineage.prepare_lineage(self.source, destination, self.thread,
+                                                 [('c:\\Neurocity', str(self.nexus))]), 1)
+        with (destination / root_page.relative_to(self.source)).open(encoding='utf-8') as inp:
+            rows = [json.loads(line) for line in inp]
+        self.assertEqual(rows[-1]['payload']['text'], large['payload']['text'])
+
 
 if __name__ == '__main__': unittest.main()

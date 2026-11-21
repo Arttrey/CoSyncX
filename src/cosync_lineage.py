@@ -13,6 +13,9 @@ import sys
 import nexus_sync as ns
 
 _PAGE = re.compile(r'-([0-9a-fA-F-]{36})(?:_([0-9a-fA-F-]{36}))?\.jsonl$')
+# Large inline attachments can make a single valid record exceed the snapshot
+# file limit. Keep a separate bounded record limit for isolated preparation.
+MAX_RECORD_BYTES = 64 * 1024 * 1024
 
 
 def _page_id(path: Path, thread: str) -> str:
@@ -29,6 +32,17 @@ def _map_cwd(cwd: str, mappings: list[tuple[str, str]]) -> str:
             mapped = ns.map_path(source, target, cwd)
             root = Path(target).resolve(strict=True)
             state, resolved = ns._resolve_local_project(Path(mapped), root, source)
+            if state == 'AVAILABLE' and resolved is not None:
+                matches.append(str(resolved))
+        except (ns.SyncError, OSError, ValueError):
+            continue
+    # A chat can already contain a path from this device after a previous
+    # handoff. Accept it only when it resolves inside a configured local root.
+    for _, target in mappings:
+        try:
+            root = Path(target).resolve(strict=True)
+            local = ns.map_path(str(root), str(root), cwd)
+            state, resolved = ns._resolve_local_project(Path(local), root, str(root))
             if state == 'AVAILABLE' and resolved is not None:
                 matches.append(str(resolved))
         except (ns.SyncError, OSError, ValueError):
@@ -82,8 +96,8 @@ def prepare_lineage(incoming: Path, destination: Path, thread_id: str,
                 old_pos = new_pos = 0
                 offsets = {}
                 with source.open('rb') as inp, output.open('xb') as out:
-                    while line := inp.readline(ns.MAX_CHAT_BYTES + 1):
-                        if len(line) > ns.MAX_CHAT_BYTES:
+                    while line := inp.readline(MAX_RECORD_BYTES + 1):
+                        if len(line) > MAX_RECORD_BYTES:
                             raise ns.SyncError('Paginated record is too large')
                         if not line.endswith(b'\n'): raise ns.SyncError('Incomplete paginated record')
                         original_length = len(line)

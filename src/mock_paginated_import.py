@@ -33,9 +33,9 @@ def _expected_visible_messages(path: Path, *, subagent: bool = False) -> Counter
     start_ordinal = None
     with path.open('rb') as stream:
         number = -1
-        while line := stream.readline(ns.MAX_CHAT_BYTES + 1):
+        while line := stream.readline(lineage.MAX_RECORD_BYTES + 1):
             number += 1
-            if len(line) > ns.MAX_CHAT_BYTES:
+            if len(line) > lineage.MAX_RECORD_BYTES:
                 raise ns.SyncError('Mock record is too large')
             if not line.endswith(b'\n'):
                 raise ns.SyncError('Incomplete mock record')
@@ -161,8 +161,8 @@ def prepare_flattened_mock(source: Path, destination: Path, thread_id: str,
                 return any(nested_ordinal(child) for child in value)
             return False
         with pages[chain[-1]]['path'].open('rb') as stream:
-            header = stream.readline(ns.MAX_CHAT_BYTES + 1)
-        if len(header) > ns.MAX_CHAT_BYTES or not header.endswith(b'\n'):
+            header = stream.readline(lineage.MAX_RECORD_BYTES + 1)
+        if len(header) > lineage.MAX_RECORD_BYTES or not header.endswith(b'\n'):
             raise ns.SyncError('Invalid mock session metadata')
         leaf_meta = json.loads(header)
         if not isinstance(leaf_meta, dict) or not isinstance(leaf_meta.get('payload'), dict):
@@ -184,8 +184,8 @@ def prepare_flattened_mock(source: Path, destination: Path, thread_id: str,
                     position, number = 0, 0
                     with source_path.open('rb') as stream:
                         while position < limit:
-                            line = stream.readline(ns.MAX_CHAT_BYTES + 1)
-                            if not line or len(line) > ns.MAX_CHAT_BYTES or not line.endswith(b'\n'):
+                            line = stream.readline(lineage.MAX_RECORD_BYTES + 1)
+                            if not line or len(line) > lineage.MAX_RECORD_BYTES or not line.endswith(b'\n'):
                                 raise ns.SyncError('Incomplete or oversized mock page record')
                             position += len(line)
                             if position > limit:

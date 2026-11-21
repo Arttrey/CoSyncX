@@ -73,7 +73,8 @@ def archive_impact(profile: Path, roots: list[str]) -> dict:
         raise ns.SyncError('Archive history unavailable')
     files = sorted({item['path'].relative_to(profile).as_posix()
                     for identity in selected for item in catalog[identity]})
-    return {'threads': selected, 'files': files, 'archived': sum(states[x] for x in selected)}
+    return {'threads': selected, 'files': files, 'archived': sum(states[x] for x in selected),
+            'archived_ids': {x for x in selected if states[x]}}
 
 
 def impact_counts(profile: Path, roots: list[str]) -> dict:

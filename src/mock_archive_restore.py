@@ -1,7 +1,7 @@
 """One-page archived-chat experiment, restricted to disposable mock profiles.
 
 An interruption leaves a journal and requires review. This is not a live
-receiver and deliberately refuses descendants and multi-page source histories.
+receiver and deliberately refuses multi-page sources and incoming descendants.
 """
 import json
 import os
@@ -16,6 +16,7 @@ import threading
 import time
 
 import cosync_archive_plan
+import cosync_graph_snapshot as graph
 import cosync_lineage as lineage
 import cosync_restore_backup as backup
 import mock_archive_backup
@@ -25,7 +26,9 @@ import mock_paginated_import as pages
 import nexus_sync as ns
 
 
-def _unarchive(profile: Path, executable: Path, thread: str) -> None:
+def _change_archive(profile: Path, executable: Path, thread: str, method: str) -> None:
+    if method not in ('thread/archive', 'thread/unarchive'):
+        raise ns.SyncError('Unsupported mock archive action')
     env = {key: value for key, value in os.environ.items()
            if key not in ('CODEX_HOME', 'OPENAI_API_KEY', 'OPENAI_ADMIN_KEY', 'CHATGPT_ACCESS_TOKEN')}
     env['CODEX_HOME'] = str(profile)
@@ -63,7 +66,7 @@ def _unarchive(profile: Path, executable: Path, thread: str) -> None:
                                'capabilities': {'experimentalApi': True}})
         process.stdin.write(b'{"method":"initialized","params":{}}\n')
         process.stdin.flush()
-        call(2, 'thread/unarchive', {'threadId': thread})
+        call(2, method, {'threadId': thread})
     finally:
         if process.stdin is not None:
             process.stdin.close()
@@ -75,6 +78,14 @@ def _unarchive(profile: Path, executable: Path, thread: str) -> None:
         reader.join(timeout=5)
         if process.stdout is not None:
             process.stdout.close()
+
+
+def _unarchive(profile: Path, executable: Path, thread: str) -> None:
+    _change_archive(profile, executable, thread, 'thread/unarchive')
+
+
+def _archive(profile: Path, executable: Path, thread: str) -> None:
+    _change_archive(profile, executable, thread, 'thread/archive')
 
 
 def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: bytes,
@@ -91,8 +102,15 @@ def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: b
     journal = backup_root / 'mock-archive-pending.json'
     mock_journal.ensure_clear(backup_root)
     impact = cosync_archive_plan.archive_impact(profile, [thread])
-    if impact['threads'] != {thread}:
-        raise ns.SyncError('Mock archived descendants need a full group transaction')
+    descendants = impact['threads'] - {thread}
+    source_catalog = ns._chat_catalog(source, include_unsupported=True)
+    if descendants & set(source_catalog) or descendants - impact['archived_ids']:
+        raise ns.SyncError('Mock descendants need a full group transaction')
+    with sqlite3.connect((profile / 'state_5.sqlite').as_uri() + '?mode=ro', uri=True) as db:
+        direct_children = [row[0] for row in db.execute(
+            'SELECT child_thread_id FROM thread_spawn_edges WHERE parent_thread_id=? ORDER BY child_thread_id', (thread,))]
+    if not set(direct_children) <= descendants:
+        raise ns.SyncError('Mock child relationships changed')
     local = ns._chat_catalog(profile, include_unsupported=True).get(thread, [])
     if not local or any(item['folder'] != 'archived_sessions' for item in local):
         raise ns.SyncError('Mock archived versions are ambiguous')
@@ -104,13 +122,19 @@ def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: b
             raise ns.SyncError('Mock archive requires one incoming page')
         saved = mock_archive_backup.prepare(profile, shared, backup_root, key, [thread])
         data = {'version': 1, 'thread': thread, 'source_digest': ns._digest(incoming[0]['path']),
-                'previous_files': impact['files'], 'title_existed': saved['title_existed']}
+                'previous_files': impact['files'], 'previous_threads': sorted(impact['threads']),
+                'title_existed': saved['title_existed']}
         fd = os.open(journal, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
         with os.fdopen(fd, 'w', encoding='utf-8') as out:
             json.dump(data, out, sort_keys=True)
             out.flush()
             os.fsync(out.fileno())
         _unarchive(profile, executable, thread)
+        for child in direct_children:
+            _archive(profile, executable, child)
+        after = cosync_archive_plan.archive_impact(profile, [thread])
+        if after['threads'] != impact['threads'] or not descendants <= after['archived_ids']:
+            raise ns.SyncError('Mock descendants did not return to archive')
         current = ns._chat_catalog(profile, include_unsupported=True).get(thread, [])
         active = [item for item in current if item['folder'] == 'sessions']
         remaining = [item for item in current if item['folder'] == 'archived_sessions']
@@ -163,6 +187,8 @@ def rollback(profile: Path, shared: Path, backup_root: Path, key: bytes) -> None
             or re.fullmatch(r'[0-9a-f]{64}', data['source_digest']) is None
             or type(data.get('title_existed')) is not bool
             or not isinstance(data.get('previous_files'), list) or not data['previous_files']
+            or not isinstance(data.get('previous_threads'), list) or not data['previous_threads']
+            or any(not graph._uuid(x) for x in data['previous_threads'])
             or not isinstance(manifest, dict) or manifest.get('version') != 1
             or not isinstance(manifest.get('files'), dict)):
         raise ns.SyncError('Invalid mock archive recovery data')
@@ -170,6 +196,9 @@ def rollback(profile: Path, shared: Path, backup_root: Path, key: bytes) -> None
     if (any(not isinstance(x, str) or not x.startswith('archived_sessions/') for x in names)
             or len(set(names)) != len(names) or not set(names) <= set(entries)):
         raise ns.SyncError('Invalid mock archived history selection')
+    affected = set(data['previous_threads'])
+    if len(affected) != len(data['previous_threads']) or thread not in affected:
+        raise ns.SyncError('Invalid mock archived thread selection')
     with mock._mock_thread_lock(profile, thread):
         saved = {}
         for name, expected in entries.items():
@@ -181,12 +210,19 @@ def rollback(profile: Path, shared: Path, backup_root: Path, key: bytes) -> None
                 raise ns.SyncError('Mock archive backup integrity failed')
             saved[name] = path
         catalog = ns._chat_catalog(latest, include_unsupported=True)
-        if set(catalog) != {thread} or {x['path'].relative_to(latest).as_posix() for x in catalog[thread]} != set(names):
+        backed_names = {item['path'].relative_to(latest).as_posix() for items in catalog.values() for item in items}
+        if set(catalog) != affected or backed_names != set(names):
             raise ns.SyncError('Mock backup does not match archived chat')
-        current = ns._chat_catalog(profile, include_unsupported=True).get(thread, [])
-        allowed = {data['source_digest']} | {entries[name] for name in names if name in entries}
-        if any(ns._digest(item['path']) not in allowed for item in current):
-            raise ns.SyncError('Mock history changed after interruption')
+        live_catalog = ns._chat_catalog(profile, include_unsupported=True)
+        current = []
+        for identity in affected:
+            allowed = {entries[x['path'].relative_to(latest).as_posix()] for x in catalog[identity]}
+            if identity == thread:
+                allowed.add(data['source_digest'])
+            items = live_catalog.get(identity, [])
+            if any(ns._digest(item['path']) not in allowed for item in items):
+                raise ns.SyncError('Mock history changed after interruption')
+            current.extend(items)
         current_names = {item['path'].relative_to(profile).as_posix() for item in current}
         for name in names:
             path = profile
