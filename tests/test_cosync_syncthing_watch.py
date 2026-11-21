@@ -32,5 +32,17 @@ class SyncthingSourceTests(unittest.TestCase):
                 with self.assertRaises(WatchError): source.read()
                 client.folder = before
 
+    def test_sendreceive_requires_explicit_opt_in(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp).resolve()
+            client = Client(folder)
+            client.folder['type'] = 'sendreceive'
+            source = SyncthingSource(client, 'chat/folder', 'vps', folder, allow_sendreceive=True)
+            self.assertEqual(source.read(), ('chat/folder', {'state': 'idle'}, True, 'valid'))
+            client.folder['type'] = 'sendonly'
+            with self.assertRaises(WatchError): source.read()
+            with self.assertRaises(WatchError):
+                SyncthingSource(client, 'chat/folder', 'vps', folder, allow_sendreceive='yes')
+
 
 if __name__ == '__main__': unittest.main()

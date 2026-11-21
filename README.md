@@ -42,6 +42,14 @@ option permits restoration while Cursor or Codex is open on macOS and Linux;
 it uses individual writer locks and has only been tested with disposable
 profiles. Recovery from an interrupted file-writing operation still waits for
 Cursor and Codex to close. Keep a backup before enabling concurrent use.
+`--allow-sendreceive-source` permits the watcher to observe a Syncthing folder
+explicitly configured as send-and-receive. It does not configure Syncthing,
+export local chats, or resolve conflicting versions.
+`python -m cosync_publish_chat` experimentally publishes one existing local
+history to its matching exchange file. The `--replace-initial` flag explicitly
+permits the first replacement; one previous exchange version is kept in a
+private state directory. Subsequent unexpected exchange changes are reported
+as conflicts. This does not export other chats, titles, or relationships.
 An indexed restore keeps its reload event until the status is published. An
 interrupted indexing pass retains its authenticated metadata so it can finish
 before a newer source revision is processed, provided the local state has not

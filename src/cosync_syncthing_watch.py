@@ -8,10 +8,11 @@ class WatchError(Exception):
 
 
 class SyncthingSource:
-    def __init__(self, client, folder_id: str, peer_id: str, sessions: Path):
-        if not folder_id or not peer_id:
+    def __init__(self, client, folder_id: str, peer_id: str, sessions: Path, *, allow_sendreceive: bool = False):
+        if not folder_id or not peer_id or type(allow_sendreceive) is not bool:
             raise WatchError('Folder and peer are required')
         self.client, self.folder_id, self.peer_id = client, folder_id, peer_id
+        self.allow_sendreceive = allow_sendreceive
         self.sessions = sessions.resolve(strict=True)
         if not self.sessions.is_dir():
             raise WatchError('Receive folder is not a directory')
@@ -20,8 +21,9 @@ class SyncthingSource:
         folder = quote(self.folder_id, safe='')
         peer = quote(self.peer_id, safe='')
         config = self.client._get('config/folders/' + folder)
-        if not isinstance(config, dict) or config.get('id') != self.folder_id or config.get('type') != 'receiveonly':
-            raise WatchError('Expected configured receive-only folder')
+        allowed = ('receiveonly', 'sendreceive') if self.allow_sendreceive else ('receiveonly',)
+        if not isinstance(config, dict) or config.get('id') != self.folder_id or config.get('type') not in allowed:
+            raise WatchError('Unexpected configured folder direction')
         path = config.get('path')
         devices = config.get('devices')
         if (not isinstance(path, str) or not isinstance(devices, list)

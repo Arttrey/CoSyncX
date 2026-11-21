@@ -21,6 +21,12 @@ import cosync_title_snapshot
                      'requires isolated Syncthing')
 class TitleRelayTests(unittest.TestCase):
     def test_active_title_export_via_untrusted_relay(self):
+        self.exercise_relay(reverse=False)
+
+    def test_bidirectional_data_via_untrusted_relay(self):
+        self.exercise_relay(reverse=True)
+
+    def exercise_relay(self, reverse):
         with tempfile.TemporaryDirectory(prefix='cosyncx-title-relay-') as tmp:
             root = Path(tmp).resolve()
             sockets = [socket.socket() for _ in range(6)]
@@ -62,7 +68,7 @@ class TitleRelayTests(unittest.TestCase):
                         '--binary', str(binary), '--home', str(homes[index])], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
                 ids = [subprocess.check_output([str(binary), 'device-id', '--home', str(home)], text=True, timeout=15).strip() for home in homes]
                 for client in clients:
-                    deadline = time.monotonic() + 30
+                    deadline = time.monotonic() + 60
                     while True:
                         try: client.ping(); break
                         except engine.EngineError:
@@ -79,7 +85,8 @@ class TitleRelayTests(unittest.TestCase):
                 for index, folder_path in enumerate((export, relay, received)):
                     folder = clients[index]._get('config/defaults/folder')
                     folder.update({'id': 'mock-titles-encrypted', 'path': str(folder_path),
-                                   'type': ('sendonly', 'receiveencrypted', 'receiveonly')[index],
+                                   'type': (('sendreceive', 'receiveencrypted', 'sendreceive') if reverse else
+                                            ('sendonly', 'receiveencrypted', 'receiveonly'))[index],
                                    'devices': devices[index]})
                     clients[index]._post('config/folders', folder)
                 deadline = time.monotonic() + 60
@@ -99,6 +106,33 @@ class TitleRelayTests(unittest.TestCase):
                     self.assertNotIn(b'synthetic private title', path.read_bytes())
                     self.assertNotIn(b'SYNTHETIC_SECRET_MUST_NOT_TRANSFER', path.read_bytes())
                 self.assertFalse((source / '.stfolder').exists())
+                if reverse:
+                    deadline = time.monotonic() + 30
+                    while time.monotonic() < deadline:
+                        relay_connections = clients[1]._get('system/connections').get('connections', {})
+                        if all(relay_connections.get(ids[i], {}).get('connected') for i in (0, 2)):
+                            break
+                        time.sleep(0.25)
+                    else:
+                        self.fail('Both relay peers did not connect')
+                    outgoing = received / 'reverse.txt'
+                    outgoing.write_text('SYNTHETIC REVERSE CHAT')
+                    clients[2]._post('db/scan?folder=mock-titles-encrypted', {})
+                    deadline = time.monotonic() + 30
+                    while time.monotonic() < deadline:
+                        back = export / 'reverse.txt'
+                        if back.is_file() and back.read_text() == 'SYNTHETIC REVERSE CHAT':
+                            break
+                        time.sleep(0.25)
+                    else:
+                        states = [client._get('db/status?folder=mock-titles-encrypted') for client in clients]
+                        summary = [{k: state.get(k) for k in ('state', 'needTotalItems', 'errors', 'pullErrors')}
+                                   for state in states]
+                        errors = clients[0]._get('folder/errors?folder=mock-titles-encrypted')
+                        self.fail('Reverse encrypted transfer did not reach sender: ' + repr(summary) + ' ' + repr(errors))
+                    relay_files = [p for p in relay.rglob('*') if p.is_file() and '.stfolder' not in p.parts]
+                    self.assertTrue(all(b'SYNTHETIC REVERSE CHAT' not in p.read_bytes() for p in relay_files))
+                    self.assertFalse(clients[0]._get('db/status?folder=mock-titles-encrypted').get('pullErrors'))
             finally:
                 for index, process in enumerate(processes):
                     if process.poll() is None:

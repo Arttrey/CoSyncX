@@ -896,6 +896,8 @@ def main(argv=None):
                         help='keep this local chat and its dependent sessions unchanged')
     parser.add_argument('--allow-active', action='store_true',
                         help='allow experimental restores while Cursor or Codex is running')
+    parser.add_argument('--allow-sendreceive-source', action='store_true',
+                        help='accept explicitly configured send-and-receive Syncthing source folders')
     parser.add_argument('--experimental', action='store_true', required=True,
                         help='enable the incomplete prototype on a disposable profile')
     args = parser.parse_args(argv)
@@ -906,7 +908,8 @@ def main(argv=None):
             backup_root=args.backup_root, key=key, mappings=args.map_root, codex=args.codex,
             folder_ids=(args.sessions_folder_id, args.titles_folder_id, args.graph_folder_id), peer_id=args.peer_id,
             excluded_thread_ids=args.exclude_thread_id, allow_active=args.allow_active)
-        sources = [cosync_syncthing_watch.SyncthingSource(client, folder, args.peer_id, path) for folder, path in (
+        sources = [cosync_syncthing_watch.SyncthingSource(client, folder, args.peer_id, path,
+                    allow_sendreceive=args.allow_sendreceive_source) for folder, path in (
             (args.sessions_folder_id, args.source / 'sessions'), (args.titles_folder_id, args.titles),
             (args.graph_folder_id, args.graph))]
         supervisor = cosync_restore_supervisor.RestoreSupervisor(receiver, sources[0].read, args.status_file,
