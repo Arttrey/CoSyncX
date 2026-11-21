@@ -139,6 +139,23 @@ def prepare_lineage(incoming: Path, destination: Path, thread_id: str,
                             if len(unavailable_files) > 10000:
                                 raise ns.SyncError('Too many unavailable local files')
                         if record.get('type') in ('session_meta', 'turn_context') and isinstance(payload, dict):
+                            if record.get('type') == 'session_meta' and 'runtime_workspace_roots' in payload:
+                                roots = payload['runtime_workspace_roots']
+                                if not isinstance(roots, list) or any(not isinstance(root, str) for root in roots):
+                                    raise ns.SyncError('Invalid runtime workspace roots')
+                                mapped_roots = []
+                                for root in roots:
+                                    try:
+                                        mapped_roots.append(_map_cwd(root, mappings))
+                                    except ns.SyncError:
+                                        ns.map_path(root, root, root)
+                                        unmapped.add(root)
+                                        if len(unmapped) > 10000:
+                                            raise ns.SyncError('Too many unmapped working directories')
+                                        mapped_roots.append(root)
+                                if mapped_roots != roots:
+                                    payload['runtime_workspace_roots'] = mapped_roots
+                                    changed = True
                             cwd = payload.get('cwd')
                             if cwd is not None:
                                 if not isinstance(cwd, str): raise ns.SyncError('Invalid working directory')

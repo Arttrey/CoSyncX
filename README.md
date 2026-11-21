@@ -28,6 +28,9 @@ history references its physical pages. A differing source history or title is
 applied after backing up the local state. Locally archived IDs stay archived;
 source archives are not transferred. Complete active relationship graphs are
 applied after indexing; missing-path reports remain unsupported.
+`--exclude-thread-id ID` keeps a selected local conversation and its dependent
+sessions untouched. This is useful for a conversation continued on another
+device; changing its display name does not change its ID.
 An indexed restore keeps its reload event until the status is published. An
 interrupted write is retried only when the backup, databases, titles and
 affected histories still match the expected state; otherwise it waits for

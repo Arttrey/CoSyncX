@@ -36,7 +36,7 @@ import nexus_sync as ns
 class DirectReceiver:
     def __init__(self, *, source: Path, titles: Path, graph: Path, profile: Path, backup_root: Path,
                  key: bytes, mappings: list[tuple[str, str]], codex: Path, folder_ids: tuple[str, str, str],
-                 peer_id: str, quiet_seconds: float = 5):
+                 peer_id: str, quiet_seconds: float = 5, excluded_thread_ids=()):
         paths = [Path(x).resolve(strict=True) for x in (source, titles, graph, profile, backup_root)]
         if any(not p.is_dir() for p in paths) or len(key) != 32 or not mappings:
             raise ns.SyncError('Invalid direct receiver configuration')
@@ -54,6 +54,10 @@ class DirectReceiver:
         if not (self.source / 'sessions').is_dir() or (self.source / 'archived_sessions').exists():
             raise ns.SyncError('Expected an active-only source')
         self.key, self.mappings = key, list(mappings)
+        if (not isinstance(excluded_thread_ids, (tuple, list, set))
+                or any(not graph_schema._uuid(identity) for identity in excluded_thread_ids)):
+            raise ns.SyncError('Invalid excluded thread IDs')
+        self.excluded_thread_ids = frozenset(excluded_thread_ids)
         self.codex = Path(codex).resolve(strict=True)
         if not self.codex.is_file():
             raise ns.SyncError('Codex executable unavailable')
@@ -348,7 +352,7 @@ class DirectReceiver:
         # A locally archived conversation stays archived even when the source
         # has an active copy. It and its dependent children must not block
         # unrelated active chats from being imported.
-        skipped = set()
+        skipped = set(self.excluded_thread_ids & set(incoming))
         for identity in incoming:
             current = local.get(identity, [])
             folders = {item['folder'] for item in current}
@@ -433,6 +437,8 @@ class DirectReceiver:
             if (not isinstance(prior.get('verified'), dict)
                     or not isinstance(prior.get('threads'), list)
                     or not isinstance(prior.get('event_id'), str) or len(prior['event_id']) != 32):
+                return None
+            if self.excluded_thread_ids & set(prior['verified']):
                 return None
             if not source_same:
                 if (prior.get('phase') != 'indexed' or not isinstance(prior.get('source_fingerprints'), dict)
@@ -735,6 +741,8 @@ def main(argv=None):
     for name in ('url', 'sessions-folder-id', 'titles-folder-id', 'graph-folder-id', 'peer-id'):
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--interval', type=float, default=5)
+    parser.add_argument('--exclude-thread-id', action='append', default=[],
+                        help='keep this local chat and its dependent sessions unchanged')
     parser.add_argument('--experimental', action='store_true', required=True,
                         help='enable the incomplete prototype on a disposable profile')
     args = parser.parse_args(argv)
@@ -743,7 +751,8 @@ def main(argv=None):
         client = cosync_engine.ExistingEngine(args.url, args.syncthing_config, config_xml=True)
         receiver = DirectReceiver(source=args.source, titles=args.titles, graph=args.graph, profile=args.profile,
             backup_root=args.backup_root, key=key, mappings=args.map_root, codex=args.codex,
-            folder_ids=(args.sessions_folder_id, args.titles_folder_id, args.graph_folder_id), peer_id=args.peer_id)
+            folder_ids=(args.sessions_folder_id, args.titles_folder_id, args.graph_folder_id), peer_id=args.peer_id,
+            excluded_thread_ids=args.exclude_thread_id)
         sources = [cosync_syncthing_watch.SyncthingSource(client, folder, args.peer_id, path) for folder, path in (
             (args.sessions_folder_id, args.source / 'sessions'), (args.titles_folder_id, args.titles),
             (args.graph_folder_id, args.graph))]

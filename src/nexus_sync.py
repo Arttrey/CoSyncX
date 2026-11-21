@@ -751,6 +751,29 @@ def _path_adjusted_relation(incoming: Path, local: Path, source_root: str, targe
             raise SyncError('Некорректная запись чата; сравнение остановлено')
         if record.get('type') in ('session_meta', 'turn_context'):
             payload = record.get('payload')
+            if record.get('type') == 'session_meta' and isinstance(payload, dict) and 'runtime_workspace_roots' in payload:
+                roots = payload['runtime_workspace_roots']
+                if not isinstance(roots, list) or any(not isinstance(value, str) for value in roots):
+                    raise SyncError('Некорректные рабочие каталоги чата')
+                normalized_roots = []
+                for value in roots:
+                    try:
+                        mapped_root = map_path(root, '/__nexus_sync_root__', value)
+                        windows_source = bool(re.match(r'^[A-Za-z]:[\\/]', root) or root.startswith('\\\\'))
+                        local_root = Path(target_root).expanduser()
+                        if (root == source_root and windows_source and os.name != 'nt'
+                                and local_root.is_absolute() and local_root.is_dir()):
+                            local_root = local_root.resolve(strict=True)
+                            candidate = Path(map_path(root, str(local_root), value))
+                            state, resolved = _resolve_local_project(candidate, local_root, root)
+                            if state != 'AVAILABLE' or resolved is None:
+                                normalized_roots.append({'nexus_sync_unresolved_windows_path': value})
+                                continue
+                            mapped_root = map_path(str(local_root), '/__nexus_sync_root__', str(resolved))
+                        normalized_roots.append({'nexus_sync_normalized_path': mapped_root})
+                    except SyncError:
+                        normalized_roots.append(value)
+                payload['runtime_workspace_roots'] = normalized_roots
             if isinstance(payload, dict) and 'cwd' in payload and not isinstance(payload['cwd'], str):
                 raise SyncError('Некорректный путь в метаданных чата')
             if isinstance(payload, dict) and isinstance(payload.get('cwd'), str):

@@ -76,6 +76,36 @@ class LineageTests(unittest.TestCase):
         with self.assertRaises(ns.SyncError):
             lineage._map_cwd(str(link), [('/foreign/Nexus', str(self.nexus))])
 
+    def test_maps_runtime_roots_and_preserves_unavailable_roots_in_report(self):
+        root_page = self._write()
+        rows = [json.loads(line) for line in root_page.read_text().splitlines()]
+        rows[0]['payload']['runtime_workspace_roots'] = ['c:\\Neurocity', '/other/device']
+        root_page.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        before = root_page.read_bytes()
+        target = self.root / 'runtime-root-prepared'
+        lineage.prepare_lineage(self.source, target, self.thread, [('c:\\Neurocity', str(self.nexus))])
+        rows = [json.loads(line) for line in (target / root_page.relative_to(self.source)).read_text().splitlines()]
+        self.assertEqual(rows[0]['payload']['runtime_workspace_roots'], [str(self.nexus), '/other/device'])
+        self.assertEqual(rows[1]['payload']['text'], 'c:\\Neurocity is historical text')
+        report = json.loads((target / 'cosyncx-path-report.json').read_text())
+        self.assertIn('/other/device', report['unmapped_working_directories'])
+        self.assertEqual(root_page.read_bytes(), before)
+
+    def test_comparison_normalizes_structured_runtime_roots_only(self):
+        left = self._write(cwd='/foreign/Nexus')
+        rows = [json.loads(line) for line in left.read_text().splitlines()]
+        rows[0]['payload']['runtime_workspace_roots'] = ['/foreign/Nexus']
+        left.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        right = self.root / 'local.jsonl'
+        rows[0]['payload']['cwd'] = str(self.nexus)
+        rows[0]['payload']['runtime_workspace_roots'] = [str(self.nexus)]
+        right.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        self.assertEqual(ns._path_adjusted_relation(left, right, '/foreign/Nexus', str(self.nexus)),
+                         'EQUIVALENT_AFTER_PATH_MAPPING')
+        rows[1]['payload']['text'] = 'different user content'
+        right.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        self.assertEqual(ns._path_adjusted_relation(left, right, '/foreign/Nexus', str(self.nexus)), 'DIVERGED')
+
     def test_prepares_large_bounded_record_without_rewriting_history(self):
         root_page = self._write()
         large = {'type': 'response_item', 'payload': {'text': 'x' * (17 * 1024 * 1024)}, 'ordinal': 2}

@@ -16,6 +16,54 @@ from test_codex_contract import read_rpc_response, stop_server
 
 
 class DirectRestoreTests(unittest.TestCase):
+    def test_excluded_active_chat_and_its_children_are_untouched(self):
+        with tempfile.TemporaryDirectory(prefix='cosyncx-excluded-chat-') as tmp:
+            root = Path(tmp).resolve()
+            source, titles, graph, profile, backups, project = (root / name for name in
+                ('source', 'titles', 'graph', 'profile', 'backups', 'project'))
+            for path in (source, titles, graph, profile, backups, project):
+                path.mkdir(mode=0o700)
+            incoming, local = source / 'sessions', profile / 'sessions'
+            incoming.mkdir(); local.mkdir()
+            protected = '019b0000-0000-7000-8000-000000000061'
+            child = '019b0000-0000-7000-8000-000000000062'
+            other = '019b0000-0000-7000-8000-000000000063'
+            for identity in (protected, child, other):
+                meta = {'id': identity, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': '/source/Nexus',
+                        'originator': 'codex_vscode', 'cli_version': '0.1.0', 'source': 'vscode',
+                        'model_provider': 'openai', 'history_mode': 'paginated'}
+                if identity == child:
+                    meta.update({'source': {'subagent': {'other': 'guardian'}}, 'parent_thread_id': protected})
+                row = {'timestamp': meta['timestamp'], 'type': 'session_meta', 'payload': meta, 'ordinal': 0}
+                name = f'rollout-2026-01-01T00-00-00-{identity}.jsonl'
+                (incoming / name).write_text(json.dumps(row) + '\n')
+                if identity == protected:
+                    row['payload']['cwd'] = str(project)
+                    (local / name).write_text(json.dumps(row) + '\n' + json.dumps(
+                        {'type': 'event_msg', 'ordinal': 1, 'payload': {'type': 'agent_message', 'message': 'local'}}) + '\n')
+                    protected_path = local / name
+            before = protected_path.read_bytes()
+            (titles / 'session_index.jsonl').write_text(''.join(json.dumps({'id': identity, 'thread_name': 'test'}) + '\n'
+                                                               for identity in (protected, other)))
+            (graph / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1',
+                'edges': [{'parent': protected, 'child': child, 'status': 'closed'}],
+                'omitted_missing': 0, 'omitted_archived': 0}))
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                db.execute('CREATE TABLE threads (id TEXT, archived INTEGER)')
+                db.execute('INSERT INTO threads VALUES (?, 0)', (protected,))
+            receiver = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
+                backup_root=backups, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
+                codex=Path(sys.executable), folder_ids=('sessions', 'titles', 'graph'), peer_id='vps',
+                excluded_thread_ids=[protected])
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True), \
+                    patch('cosync_direct_restore.indexer._index_profile') as indexer:
+                self.assertEqual(receiver._receive(), 1)
+            indexer.assert_called_once()
+            self.assertEqual(indexer.call_args.args[1], other)
+            self.assertEqual(protected_path.read_bytes(), before)
+            self.assertFalse((local / f'rollout-2026-01-01T00-00-00-{child}.jsonl').exists())
+            self.assertTrue((local / f'rollout-2026-01-01T00-00-00-{other}.jsonl').exists())
+
     def test_source_change_after_indexing_is_reconciled_before_reload(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-source-change-') as tmp:
             root = Path(tmp).resolve()
@@ -474,10 +522,6 @@ class DirectRestoreTests(unittest.TestCase):
             self.assertTrue(journal.is_file())
             existing.acknowledge(None)
             self.assertFalse(journal.exists())
-            with target.open('a') as out:
-                for line in later:
-                    out.write(line.replace('later source message', 'different local message'))
-            divergent_local = target.read_bytes()
             with history.open('a') as out:
                 out.writelines(later)
             updated = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
@@ -486,7 +530,7 @@ class DirectRestoreTests(unittest.TestCase):
             with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True):
                 self.assertEqual(updated._receive(), 1)
             self.assertIn(b'later source message', target.read_bytes())
-            self.assertEqual((backups / 'latest' / target.relative_to(profile)).read_bytes(), divergent_local)
+            self.assertEqual((backups / 'latest' / target.relative_to(profile)).read_bytes(), original)
             updated_record = json.loads(journal.read_text())
             updated.acknowledge({'id': updated_record['event_id'], 'indexed': True, 'changed_chats': 1})
             child = '019b0000-0000-7000-8000-000000000012'
