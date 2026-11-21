@@ -499,6 +499,13 @@ def index_thread(profile: Path, shared: Path, key: bytes, thread_id: str,
     executable = executable.resolve(strict=True)
     if not shared.is_dir() or not executable.is_file():
         raise ns.SyncError('Invalid mock index configuration')
+    return _index_profile(profile, thread_id, executable, title=title,
+                          allow_title_change=allow_title_change, on_verified=on_verified)
+
+
+def _index_profile(profile: Path, thread_id: str, executable: Path, *, title: str | None = None,
+                   allow_title_change: bool = False, on_verified=None) -> None:
+    """Codex index operation; caller must validate and coordinate the profile."""
     if title is not None:
         if not isinstance(title, str) or not title:
             raise ns.SyncError('Invalid mock chat title')
