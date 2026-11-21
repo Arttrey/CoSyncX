@@ -37,6 +37,30 @@ def _verify_backup(latest: Path, expected: str) -> None:
             raise ns.SyncError('Mock group backup changed')
 
 
+def _refresh_parent(profile: Path, parent_step: Path, parent: str, key: bytes) -> None:
+    """Re-observe SQLite after a later, verified step has rolled back."""
+    journal = parent_step / 'mock-archive-pending.json'
+    if journal.is_symlink() or not journal.is_file() or journal.stat().st_size > 1024 * 1024:
+        raise ns.SyncError('Mock group parent journal unavailable')
+    data = json.loads(journal.read_bytes())
+    if (not isinstance(data, dict) or data.get('thread') != parent
+            or not isinstance(data.get('authentication'), str)
+            or not hmac.compare_digest(data['authentication'], ns._manifest_tag(data, key))
+            or not isinstance(data.get('verified_db_signatures'), dict)):
+        raise ns.SyncError('Mock group parent journal invalid')
+    manifest_path = parent_step / 'latest' / 'manifest.json'
+    if archive._stable_digest(manifest_path) != data.get('backup_manifest_digest'):
+        raise ns.SyncError('Mock group parent backup changed')
+    manifest = json.loads(manifest_path.read_bytes())
+    if not isinstance(manifest, dict) or not isinstance(manifest.get('files'), dict):
+        raise ns.SyncError('Mock group parent backup invalid')
+    names = {name for name in manifest['files'] if re.fullmatch(r'(?:state|thread_history)_\d+\.sqlite', name)}
+    if not names:
+        raise ns.SyncError('Mock group parent databases unavailable')
+    data['verified_db_signatures'] = archive._db_signatures(profile, names)
+    archive._replace_journal(journal, data, key)
+
+
 def restore(source: Path, profile: Path, shared: Path, backup_root: Path, key: bytes,
             parent: str, mappings: list[tuple[str, str]], executable: Path, *, children: list[str],
             title: str | None = None, flatten_multi: bool = False, fallback_root: Path | None = None) -> dict:
@@ -127,28 +151,7 @@ def recover(profile: Path, shared: Path, backup_root: Path, key: bytes) -> None:
         parent_journal = parent_step / 'mock-archive-pending.json'
         if child_journal.exists() or child_journal.is_symlink():
             child_batch.rollback(profile, shared, child_step, key)
-            # The child rollback restored its verified pre-step SQLite backup.
-            # SQLite may change file metadata while copying those same pages;
-            # refresh the parent's authenticated observation before its rollback.
-            if parent_journal.is_symlink() or not parent_journal.is_file() or parent_journal.stat().st_size > 1024 * 1024:
-                raise ns.SyncError('Mock group parent journal unavailable')
-            parent_data = json.loads(parent_journal.read_bytes())
-            if (not isinstance(parent_data, dict) or parent_data.get('thread') != data['parent']
-                    or not isinstance(parent_data.get('authentication'), str)
-                    or not hmac.compare_digest(parent_data['authentication'], ns._manifest_tag(parent_data, key))
-                    or not isinstance(parent_data.get('verified_db_signatures'), dict)):
-                raise ns.SyncError('Mock group parent journal invalid')
-            parent_manifest = parent_step / 'latest' / 'manifest.json'
-            if archive._stable_digest(parent_manifest) != parent_data.get('backup_manifest_digest'):
-                raise ns.SyncError('Mock group parent backup changed')
-            manifest = json.loads(parent_manifest.read_bytes())
-            if not isinstance(manifest, dict) or not isinstance(manifest.get('files'), dict):
-                raise ns.SyncError('Mock group parent backup invalid')
-            db_names = {name for name in manifest['files'] if re.fullmatch(r'(?:state|thread_history)_\d+\.sqlite', name)}
-            if not db_names:
-                raise ns.SyncError('Mock group parent databases unavailable')
-            parent_data['verified_db_signatures'] = archive._db_signatures(profile, db_names)
-            archive._replace_journal(parent_journal, parent_data, key)
+            _refresh_parent(profile, parent_step, data['parent'], key)
         if parent_journal.exists() or parent_journal.is_symlink():
             archive.rollback(profile, shared, parent_step, key)
     for path in (child_step, parent_step):
