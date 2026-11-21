@@ -92,6 +92,70 @@ class DirectReceiver:
         finally:
             temporary.unlink(missing_ok=True)
 
+    def _database_state(self, names):
+        result = {}
+        for name in sorted(names):
+            for path in (self.profile / name, self.profile / (name + '-wal')):
+                if path.is_symlink():
+                    raise ns.SyncError('Direct database is a link')
+                if not path.exists():
+                    result[path.name] = None
+                    continue
+                info = path.stat()
+                result[path.name] = (None if path.name.endswith('-wal') and info.st_size == 0 else
+                                     [info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns])
+        return result
+
+    def _title_state(self):
+        raw = ns._read_title_index(self.profile)
+        return hashlib.sha256(raw).hexdigest() if raw is not None else None
+
+    def _resume_indexing(self, record, incoming, kinds, names, edges, graph, db_names):
+        queue, offset = record.get('index_queue'), record.get('next_index')
+        expected, verified = record.get('expected'), record.get('verified')
+        if (not isinstance(queue, list) or type(offset) is not int or not 0 <= offset <= len(queue)
+                or not isinstance(expected, dict) or set(expected) != set(incoming) or not isinstance(verified, dict)
+                or any(not isinstance(item, list) or len(item) != 2 or item[0] not in incoming
+                       or item[1] != (names.get(item[0]) if kinds[item[0]] == 'chat' else None) for item in queue)
+                or len({item[0] for item in queue}) != len(queue)
+                or self._database_state(db_names) != record.get('database_state')
+                or self._title_state() != record.get('local_title_state')):
+            return None
+        catalog = ns._chat_catalog(self.profile, include_unsupported=True)
+        for identity, digest in expected.items():
+            current = catalog.get(identity, [])
+            if (len(current) != 1 or current[0]['folder'] != 'sessions'
+                    or not isinstance(digest, str) or ns._digest(current[0]['path']) != digest):
+                return None
+        for index in range(offset, len(queue)):
+            identity, title = queue[index]
+            if not quiescence.is_quiet():
+                return None
+            indexer._index_profile(self.profile, identity, self.codex, title=title, allow_title_change=True)
+            current = ns._chat_catalog(self.profile, include_unsupported=True).get(identity, [])
+            if len(current) != 1 or current[0]['folder'] != 'sessions':
+                raise ns.SyncError('Direct indexed history unavailable')
+            digest = ns._digest(current[0]['path'])
+            expected[identity] = digest
+            verified[identity] = {'digest': digest, 'title': title}
+            self.verified[identity] = (digest, title)
+            record['next_index'] = index + 1
+            record['database_state'] = self._database_state(db_names)
+            record['local_title_state'] = self._title_state()
+            self._write_journal(record)
+        if set(verified) != set(incoming):
+            return None
+        if edges:
+            if not quiescence.is_quiet():
+                return None
+            with tempfile.TemporaryDirectory(prefix='cosyncx-active-graph-') as tmp:
+                filtered = Path(tmp) / 'graph.json'
+                filtered.write_text(json.dumps({**graph, 'edges': edges}), encoding='utf-8')
+                mock_graph_restore._apply_graph(self.profile, self.backup_root, filtered, use_existing_backup=True)
+        record['phase'] = 'indexed'
+        self._write_journal(record)
+        return len(record['threads'])
+
     def acknowledge(self, event):
         record = self._read_journal()
         changed = len(record.get('threads', [])) if record else -1
@@ -213,7 +277,7 @@ class DirectReceiver:
             if not self._recover_interrupted(prior):
                 return None
             prior = None
-        if prior is not None and prior.get('phase') != 'indexed':
+        if prior is not None and prior.get('phase') not in ('indexing', 'indexed'):
             return None
         graph_file = self.graph / 'graph.json'
         if graph_file.is_symlink() or not graph_file.is_file() or graph_file.stat().st_size > 32 * 1024 * 1024:
@@ -320,10 +384,19 @@ class DirectReceiver:
                     or prior.get('title_digest') != hashlib.sha256(title_bytes).hexdigest()
                     or prior.get('graph_digest') != hashlib.sha256(graph_bytes).hexdigest()
                     or not isinstance(prior.get('verified'), dict)
-                    or set(prior['verified']) != set(fingerprints)
                     or not isinstance(prior.get('threads'), list)
                     or not set(prior['threads']) <= set(fingerprints)
                     or not isinstance(prior.get('event_id'), str) or len(prior['event_id']) != 32):
+                return None
+            db_names = {name for name in saved['files'] if name.startswith(('state_', 'thread_history_'))
+                        and name.endswith('.sqlite')}
+            current_db_names = {path.name for pattern in ('state_*.sqlite', 'thread_history_*.sqlite')
+                                for path in self.profile.glob(pattern)}
+            if not db_names or db_names != current_db_names:
+                return None
+            if prior['phase'] == 'indexing':
+                return self._resume_indexing(prior, incoming, kinds, names, edges, graph, db_names)
+            if set(prior['verified']) != set(fingerprints):
                 return None
             ordered = sorted(fingerprints, key=lambda identity: (depth[identity], identity))
             for identity in ordered:
@@ -520,25 +593,18 @@ class DirectReceiver:
             to_index = [(identity, title) for identity, _, _, title in prepared]
             to_index += [(identity, title) for identity, _, title, _, _, _ in recheck]
             to_index.sort(key=lambda item: (depth[item[0]], item[0]))
-            for identity, title in to_index:
-                if not quiescence.is_quiet():
-                    raise ns.SyncError('Codex started during direct restore')
-                indexer._index_profile(self.profile, identity, self.codex, title=title, allow_title_change=True)
-                current = ns._chat_catalog(self.profile, include_unsupported=True).get(identity, [])
-                if len(current) != 1:
-                    raise ns.SyncError('Direct indexed history unavailable')
-                self.verified[identity] = (ns._digest(current[0]['path']), title)
-                verified[identity] = {'digest': self.verified[identity][0], 'title': title}
-            if edges:
-                if not quiescence.is_quiet():
-                    raise ns.SyncError('Codex started during direct restore')
-                filtered = Path(temp).resolve() / 'filtered-graph.json'
-                filtered.write_text(json.dumps({**graph, 'edges': edges}), encoding='utf-8')
-                mock_graph_restore._apply_graph(self.profile, self.backup_root, filtered, use_existing_backup=True)
-            record['verified'] = verified
-            record['phase'] = 'indexed'
+            current = ns._chat_catalog(self.profile, include_unsupported=True)
+            expected = {}
+            for identity in incoming:
+                items = current.get(identity, [])
+                if len(items) != 1 or items[0]['folder'] != 'sessions':
+                    raise ns.SyncError('Direct history unavailable after writing')
+                expected[identity] = ns._digest(items[0]['path'])
+            record.update({'verified': verified, 'expected': expected, 'index_queue': [list(item) for item in to_index],
+                           'next_index': 0, 'database_state': self._database_state(dbs),
+                           'local_title_state': self._title_state(), 'phase': 'indexing'})
             self._write_journal(record)
-            return len(changed)
+            return self._resume_indexing(record, incoming, kinds, names, edges, graph, set(dbs))
 
     def poll(self, chat_reader, *, title_status_reader=None, graph_status_reader=None, on_restore=None, now=None):
         if self.pending_result is not None:

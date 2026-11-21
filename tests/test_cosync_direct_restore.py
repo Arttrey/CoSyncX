@@ -16,6 +16,52 @@ from test_codex_contract import read_rpc_response, stop_server
 
 
 class DirectRestoreTests(unittest.TestCase):
+    def test_resume_after_one_indexed_chat_does_not_repeat_it(self):
+        with tempfile.TemporaryDirectory(prefix='cosyncx-index-resume-') as tmp:
+            root = Path(tmp).resolve()
+            source, titles, graph, profile, backups, project = (root / name for name in
+                ('source', 'titles', 'graph', 'profile', 'backups', 'project'))
+            for path in (source, titles, graph, profile, backups, project):
+                path.mkdir(mode=0o700)
+            sessions = source / 'sessions'; sessions.mkdir()
+            identities = ['019b0000-0000-7000-8000-000000000041', '019b0000-0000-7000-8000-000000000042']
+            for identity in identities:
+                meta = {'id': identity, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': '/source/Nexus',
+                        'originator': 'codex_vscode', 'cli_version': '0.1.0', 'source': 'vscode',
+                        'model_provider': 'openai', 'history_mode': 'paginated'}
+                (sessions / f'rollout-2026-01-01T00-00-00-{identity}.jsonl').write_text(
+                    json.dumps({'timestamp': meta['timestamp'], 'type': 'session_meta', 'payload': meta, 'ordinal': 0}) + '\n')
+            (titles / 'session_index.jsonl').write_text(''.join(
+                json.dumps({'id': identity, 'thread_name': 'test'}) + '\n' for identity in identities))
+            (graph / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1', 'edges': [],
+                'omitted_missing': 0, 'omitted_archived': 0}))
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                db.execute('CREATE TABLE threads (id TEXT, archived INTEGER)')
+            args = dict(source=source, titles=titles, graph=graph, profile=profile, backup_root=backups,
+                key=b'k' * 32, mappings=[('/source/Nexus', str(project))], codex=Path(sys.executable),
+                folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0)
+            calls = []
+            def index(_profile, identity, *_args, **_kwargs):
+                calls.append(identity)
+                if len(calls) == 2:
+                    raise ns.SyncError('synthetic interruption')
+                with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                    db.execute('INSERT INTO threads VALUES (?, 0)', (identity,))
+            receiver = DirectReceiver(**args)
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True), \
+                    patch('cosync_direct_restore.indexer._index_profile', side_effect=index):
+                with self.assertRaises(ns.SyncError):
+                    receiver._receive()
+            record = json.loads((backups / 'direct-restore-pending.json').read_text())
+            self.assertEqual((record['phase'], record['next_index']), ('indexing', 1))
+            resumed = DirectReceiver(**args)
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True), \
+                    patch('cosync_direct_restore.indexer._index_profile', side_effect=index):
+                self.assertEqual(resumed._receive(), 2)
+            self.assertEqual(calls, [identities[0], identities[1], identities[1]])
+            with sqlite3.connect(profile / 'state_5.sqlite') as db:
+                self.assertEqual({row[0] for row in db.execute('SELECT id FROM threads')}, set(identities))
+
     def test_multipage_source_with_external_page_reference_is_deferred(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-page-reference-') as tmp:
             root = Path(tmp).resolve()
@@ -185,8 +231,12 @@ class DirectRestoreTests(unittest.TestCase):
             self.assertFalse((backups / 'latest').exists())
             with sqlite3.connect(profile / 'state_5.sqlite') as db:
                 db.execute('DELETE FROM threads WHERE id=?', (thread,))
+            real_link = os.link
+            def link_then_interrupt(*args, **kwargs):
+                real_link(*args, **kwargs)
+                raise ns.SyncError('interrupted during copy')
             with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True), \
-                    patch('cosync_direct_restore.indexer._index_profile', side_effect=ns.SyncError('interrupted')):
+                    patch('cosync_direct_restore.os.link', side_effect=link_then_interrupt):
                 with self.assertRaises(ns.SyncError):
                     receiver._receive()
             interrupted = profile / history.relative_to(source)
