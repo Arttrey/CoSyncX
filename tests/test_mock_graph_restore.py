@@ -6,6 +6,7 @@ import unittest
 
 import mock_chat_sync as mock
 import mock_graph_restore as restore
+import cosync_restore_backup as backup
 import nexus_sync as ns
 
 
@@ -53,6 +54,27 @@ class MockGraphRestoreTests(unittest.TestCase):
             db.execute('UPDATE threads SET archived=1 WHERE id=?', (self.ids[1],))
         with self.assertRaises(ns.SyncError): restore.apply_graph(self.profile, self.shared, self.backup, self.graph, self.key)
         self.assertFalse((self.backup / 'latest').exists())
+
+    def test_existing_transaction_backup_is_preserved(self):
+        chat = self.profile / 'sentinel.jsonl'
+        chat.write_text('original history')
+        backup.replace_latest(self.profile, self.backup, [self.db.name, chat.name])
+        self.assertEqual(restore.apply_graph(self.profile, self.shared, self.backup, self.graph, self.key,
+                                            use_existing_backup=True), 1)
+        self.assertEqual((self.backup / 'latest' / chat.name).read_text(), 'original history')
+        with sqlite3.connect(self.backup / 'latest' / self.db.name) as db:
+            self.assertEqual(db.execute('SELECT parent_thread_id FROM thread_spawn_edges WHERE child_thread_id=?',
+                                        (self.ids[1],)).fetchone(), (self.ids[2],))
+
+    def test_existing_transaction_backup_must_be_valid(self):
+        backup.replace_latest(self.profile, self.backup, [self.db.name])
+        (self.backup / 'latest' / self.db.name).write_bytes(b'corrupted')
+        with self.assertRaises(ns.SyncError):
+            restore.apply_graph(self.profile, self.shared, self.backup, self.graph, self.key,
+                                use_existing_backup=True)
+        with sqlite3.connect(self.db) as db:
+            self.assertEqual(db.execute('SELECT parent_thread_id FROM thread_spawn_edges WHERE child_thread_id=?',
+                                        (self.ids[1],)).fetchone(), (self.ids[2],))
 
     def test_rejects_cycle_created_by_merging_with_local_edges(self):
         with sqlite3.connect(self.db) as db:

@@ -87,7 +87,9 @@ class MockGraphRestoreContractTests(unittest.TestCase):
             graph.write_text(json.dumps({'format': 'cosyncx-active-graph-v1', 'created_at_ms': 1,
                 'omitted_archived': 0, 'omitted_missing': 0,
                 'edges': [{'parent': parent, 'child': child, 'status': 'closed'}]}))
-            self.assertEqual(mock_graph_restore.apply_graph(profile, shared, backup, graph, key), 1)
+            self.assertEqual(mock_graph_restore.apply_graph(profile, shared, backup, graph, key,
+                                                           use_existing_backup=True), 1)
+            self.assertTrue((backup / 'latest' / 'thread_history_1.sqlite').is_file())
             server = start()
             try:
                 self.assertIn(child, [row['id'] for row in listing(server, 2)])

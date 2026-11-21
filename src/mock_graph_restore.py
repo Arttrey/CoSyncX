@@ -10,7 +10,8 @@ import mock_chat_sync as mock
 import nexus_sync as ns
 
 
-def apply_graph(profile: Path, shared: Path, backup_root: Path, graph_file: Path, key: bytes) -> int:
+def apply_graph(profile: Path, shared: Path, backup_root: Path, graph_file: Path, key: bytes,
+                *, use_existing_backup: bool = False) -> int:
     profile = mock._validate_profile(profile, key)
     shared, backup_root, graph_file = (mock._mock_path(path) for path in (shared, backup_root, graph_file))
     if (not shared.is_dir() or not backup_root.is_dir() or graph_file.is_symlink() or not graph_file.is_file()
@@ -87,7 +88,23 @@ def apply_graph(profile: Path, shared: Path, backup_root: Path, graph_file: Path
                 resolved.update(visited)
             if not changes:
                 return 0
-            backup.replace_latest(profile, backup_root, [database.name])
+            if use_existing_backup:
+                latest = backup_root / 'latest'
+                manifest_path = latest / 'manifest.json'
+                if (latest.is_symlink() or not latest.is_dir() or manifest_path.is_symlink()
+                        or not manifest_path.is_file() or manifest_path.stat().st_size > 1024 * 1024):
+                    raise ns.SyncError('Mock transaction backup unavailable')
+                manifest = json.loads(manifest_path.read_bytes())
+                try:
+                    saved = backup._resolve_file(latest, database.name)
+                except backup.BackupError as exc:
+                    raise ns.SyncError('Mock transaction database backup unavailable') from exc
+                if (not isinstance(manifest, dict) or manifest.get('version') != 1
+                        or not isinstance(manifest.get('files'), dict)
+                        or manifest['files'].get(database.name) != ns._digest(saved)):
+                    raise ns.SyncError('Mock transaction database backup mismatch')
+            else:
+                backup.replace_latest(profile, backup_root, [database.name])
             if (graph_file.stat().st_size != before.st_size or ns._digest(graph_file) != hashlib.sha256(raw).hexdigest()):
                 raise ns.SyncError('Mock graph changed during backup')
             db.executemany('INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id, status) VALUES (?, ?, ?) '
