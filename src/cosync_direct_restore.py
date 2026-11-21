@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import shutil
+import time
 
 import cosync_auto_gate
 import cosync_engine
@@ -75,6 +76,7 @@ class DirectReceiver:
         self.pending_result = None
         self.unresolved_archived_count = 0
         self.pending_busy_ids = frozenset()
+        self._last_pending_retry = None
         self._ignored_busy = frozenset()
         self.path_warning_count = 0
         report = self.backup_root / 'missing-paths.json'
@@ -91,6 +93,18 @@ class DirectReceiver:
 
     def _write_allowed(self):
         return self.allow_active or quiescence.is_quiet()
+
+    def _existing_workspace(self, entries):
+        """Reuse only this chat's already configured, available local workspace."""
+        if not self.prefer_more_messages or len(entries) != 1 or entries[0].get('folder') != 'sessions':
+            return None
+        cwd = entries[0].get('cwd')
+        if not isinstance(cwd, str):
+            return None
+        try:
+            return Path(lineage._map_cwd(cwd, self.mappings))
+        except (ns.SyncError, OSError, ValueError):
+            return None
 
     def _write_path_report(self, reports):
         """Keep missing local paths private and available across restarts."""
@@ -213,6 +227,63 @@ class DirectReceiver:
     def _title_state(self):
         raw = ns._read_title_index(self.profile)
         return hashlib.sha256(raw).hexdigest() if raw is not None else None
+
+    def _retire_unchanged_indexing(self, record, journal):
+        """Retire an interrupted verification-only pass without touching chats.
+
+        Only entries that are still present and indexed can be reused. A pass
+        that changed a chat or its relationships always follows normal recovery.
+        """
+        operations, verified = record.get('operations'), record.get('verified')
+        snapshot = record.get('index_snapshot')
+        if (record.get('phase') != 'indexing' or record.get('threads') != [] or record.get('paths') != []
+                or not isinstance(operations, list) or not operations
+                or any(not isinstance(op, dict) or op.get('before') is None or op.get('before') != op.get('after')
+                       for op in operations)
+                or not isinstance(verified, dict) or not isinstance(snapshot, dict)
+                or snapshot.get('edges') != [] or self._read_carry()):
+            return False
+        manifest = self.backup_root / 'latest' / 'manifest.json'
+        if (manifest.is_symlink() or not manifest.is_file()
+                or ns._digest(manifest) != record.get('backup_manifest_digest')):
+            return False
+        try:
+            if any((self.profile / name).is_symlink() or not (self.profile / name).is_file()
+                   for name in ('state_5.sqlite', 'thread_history_1.sqlite')):
+                return False
+            local = ns._chat_catalog(self.profile, include_unsupported=True)
+            busy = locking._busy_thread_ids(self.profile)
+            title_data = ns._read_title_index(self.profile)
+            titles = ({row['id']: row['thread_name'] for row in ns._parse_title_index(title_data)}
+                      if title_data is not None else {})
+            with closing(sqlite3.connect((self.profile / 'state_5.sqlite').as_uri() + '?mode=ro', uri=True)) as db:
+                rows = {row[0]: row[1:] for row in db.execute('SELECT id, rollout_path, title, archived FROM threads')}
+            with closing(sqlite3.connect((self.profile / 'thread_history_1.sqlite').as_uri() + '?mode=ro', uri=True)) as db:
+                projected = {row[0] for row in db.execute('SELECT thread_id FROM thread_history_projection_state')}
+            reusable = {}
+            for identity, item in verified.items():
+                entries, row = local.get(identity, []), rows.get(identity)
+                if (identity in busy or identity not in projected or len(entries) != 1
+                        or entries[0]['folder'] != 'sessions' or not isinstance(item, dict)
+                        or not row or row[2] != 0 or row[0] != str(entries[0]['path'])
+                        or (item.get('title') is not None and
+                            (row[1] != item['title'] or titles.get(identity) != item['title']))):
+                    continue
+                path = entries[0]['path']
+                before = path.stat()
+                digest = ns._digest(path)
+                after = path.stat()
+                if ((before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                        == (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+                        and digest == item.get('digest')):
+                    reusable[identity] = (digest, item.get('title'))
+            if self._read_journal() != record:
+                return False
+            journal.unlink()
+            self.verified.update(reusable)
+            return True
+        except (OSError, ValueError, TypeError, sqlite3.Error, ns.SyncError):
+            return False
 
     def _resume_indexing(self, record, incoming, kinds, names, edges, graph, db_names):
         queue, offset = record.get('index_queue'), record.get('next_index')
@@ -372,12 +443,18 @@ class DirectReceiver:
             (self.backup_root / 'direct-restore-pending.json').unlink()
         return True
 
-    def _receive(self) -> int | None:
+    def _receive(self, on_restore=None) -> int | None:
         journal = self.backup_root / 'direct-restore-pending.json'
         self._read_carry()
         prior = self._read_journal() if journal.exists() or journal.is_symlink() else None
         if (journal.exists() or journal.is_symlink()) and not prior:
             return None
+        if prior is not None and prior.get('phase') == 'indexing':
+            db_names = {name.removesuffix('-wal') for name in prior.get('database_state', {})}
+            if (self._database_state(db_names) != prior.get('database_state')
+                    or self._title_state() != prior.get('local_title_state')):
+                if self._retire_unchanged_indexing(prior, journal):
+                    prior = None
         try:
             mock_journal.ensure_clear(self.backup_root)
         except ns.SyncError:
@@ -469,6 +546,7 @@ class DirectReceiver:
                         self.pending_busy_ids |= frozenset((identity,))
                         continue
                     try:
+                        fallback = self._existing_workspace(current)
                         if (not current or source_kinds[identity] != 'chat') and len(entries) == 1:
                             cwd = entries[0].get('cwd')
                             if not isinstance(cwd, str): raise ns.SyncError('Working directory unavailable')
@@ -476,7 +554,7 @@ class DirectReceiver:
                             continue
                         stage = Path(tmp) / ('source-' + str(number))
                         if len(entries) == 1:
-                            lineage.prepare_lineage(self.source, stage, identity, self.mappings,
+                            lineage.prepare_lineage(self.source, stage, identity, self.mappings, fallback_root=fallback,
                                                     preserve_unmapped_history=True)
                         else:
                             if source_kinds[identity] != 'chat': raise ns.SyncError('Unsupported multi-page history')
@@ -485,7 +563,7 @@ class DirectReceiver:
                                    and item['history_base'].get('thread_id') in pages
                                    for other, others in all_incoming.items() if other != identity for item in others):
                                 raise ns.SyncError('Referenced multi-page history')
-                            indexer._prepare_flattened(self.source, stage, identity, self.mappings,
+                            indexer._prepare_flattened(self.source, stage, identity, self.mappings, fallback_root=fallback,
                                                        preserve_unmapped_history=True)
                         staged = ns._chat_catalog(stage, include_unsupported=True).get(identity, [])
                         if len(staged) != 1: raise ns.SyncError('History comparison unavailable')
@@ -637,7 +715,7 @@ class DirectReceiver:
                     events.append({'id': prior['event_id'], 'count': len(prior['threads'])})
                     self._write_carry(events)
                 journal.unlink()
-                return self._receive()
+                return self._receive(on_restore=on_restore)
             if not set(prior['threads']) <= set(fingerprints):
                 return None
             db_names = {name for name in saved['files'] if name.startswith(('state_', 'thread_history_'))
@@ -647,10 +725,12 @@ class DirectReceiver:
             if not db_names or db_names != current_db_names:
                 return None
             if prior['phase'] == 'indexing':
+                if on_restore is not None: on_restore()
                 return self._resume_indexing(prior, incoming, kinds, names, edges, graph, db_names)
             if set(prior['verified']) != set(fingerprints):
                 return None
             ordered = sorted(fingerprints, key=lambda identity: (depth[identity], identity))
+            if on_restore is not None: on_restore()
             for identity in ordered:
                 current = local.get(identity, [])
                 item = prior['verified'].get(identity)
@@ -684,9 +764,11 @@ class DirectReceiver:
                 if not entries or kinds[identity] not in ('chat', 'subagent'):
                     return None
                 stage = Path(temp).resolve() / str(number)
+                fallback = (self._existing_workspace(local.get(identity, [])) if self.prefer_more_messages
+                            else Path(self.mappings[0][1]))
                 if len(entries) == 1:
                     lineage.prepare_lineage(self.source, stage, identity, self.mappings,
-                                            fallback_root=None if self.prefer_more_messages else Path(self.mappings[0][1]),
+                                            fallback_root=fallback,
                                             preserve_unmapped_history=self.prefer_more_messages)
                 else:
                     if kinds[identity] != 'chat':
@@ -699,7 +781,7 @@ class DirectReceiver:
                                item['history_base'].get('thread_id') in page_ids for item in other_entries):
                             return None
                     indexer._prepare_flattened(self.source, stage, identity, self.mappings,
-                                               fallback_root=None if self.prefer_more_messages else Path(self.mappings[0][1]),
+                                               fallback_root=fallback,
                                                preserve_unmapped_history=self.prefer_more_messages)
                 report = stage / 'cosyncx-path-report.json'
                 if report.is_file() and not report.is_symlink():
@@ -754,6 +836,7 @@ class DirectReceiver:
                     return None
                 title = names.get(identity) if kinds[identity] == 'chat' else None
                 recheck.append((identity, current[0]['path'], title, ns._digest(current[0]['path']), None, False))
+            if on_restore is not None: on_restore()
             prepared.sort(key=lambda entry: (depth[entry[0]], entry[0]))
             db_paths = {p for pattern in ('state_*.sqlite', 'thread_history_*.sqlite')
                         for p in self.profile.glob(pattern)}
@@ -891,7 +974,7 @@ class DirectReceiver:
             self._write_journal(record)
             return self._resume_indexing(record, incoming, kinds, names, edges, graph, set(dbs))
 
-    def poll(self, chat_reader, *, title_status_reader=None, graph_status_reader=None, on_restore=None, now=None):
+    def poll(self, chat_reader, *, title_status_reader=None, graph_status_reader=None, on_check=None, on_restore=None, now=None):
         if self.pending_result is not None:
             return self.pending_result
         if title_status_reader is None or graph_status_reader is None:
@@ -902,15 +985,21 @@ class DirectReceiver:
         observations = observe()
         revision = self.gate.observe(observations, now=now)
         if revision is None:
-            if self.gate.is_current(now=now) and self.pending_busy_ids:
+            if self.gate.is_current(now=now) and (self.backup_root / 'direct-restore-pending.json').exists():
                 self.gate.request_retry()
+                return {'state': 'PENDING', 'mock_only': False}
+            if self.gate.is_current(now=now) and self.pending_busy_ids:
+                current_time = time.monotonic() if now is None else now
+                if self._last_pending_retry is None or current_time - self._last_pending_retry >= 60:
+                    self._last_pending_retry = current_time
+                    self.gate.request_retry()
                 return {'state': 'PENDING', 'mock_only': False}
             state = ('PENDING' if self.unresolved_archived_count else 'CURRENT') if self.gate.is_current(now=now) else 'WAITING'
             return {'state': state, 'mock_only': False}
-        if on_restore is not None:
-            on_restore()
+        if on_check is not None:
+            on_check()
         try:
-            count = self._receive()
+            count = self._receive(on_restore=on_restore)
         except locking.MockChatBusy:
             return {'state': 'PENDING', 'mock_only': False}
         if count is None:
@@ -930,7 +1019,7 @@ class DirectReceiver:
             event['id'] = carry[0]['id'] if carry else record['event_id']
         state = 'PENDING' if self.unresolved_archived_count or self.pending_busy_ids else 'COMPLETE'
         if self.pending_busy_ids:
-            self.gate.request_retry()
+            self._last_pending_retry = time.monotonic() if now is None else now
         result = {'state': state, 'mock_only': False, 'restore_event': event}
         if carry or (record and record.get('phase') == 'indexed'):
             result['acknowledge_required'] = True

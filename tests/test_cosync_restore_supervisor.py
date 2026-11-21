@@ -17,6 +17,8 @@ class RestoreSupervisorTests(unittest.TestCase):
                     self.acknowledged.append(event)
                 def poll(self, _reader, **kwargs):
                     if self.result['state'] == 'COMPLETE':
+                        kwargs['on_check']()
+                        self.checking = json.loads(path.read_text())['state']
                         kwargs['on_restore']()
                         self.during = json.loads(path.read_text())['state']
                     return self.result
@@ -36,6 +38,7 @@ class RestoreSupervisorTests(unittest.TestCase):
             self.assertEqual(supervisor.tick()['state'], 'COMPLETE')
             saved = json.loads(path.read_text())
             self.assertEqual(receiver.during, 'RESTORING')
+            self.assertEqual(receiver.checking, 'CHECKING')
             self.assertEqual(saved['restore_event'], event)
             partial = {**event, 'id': 'c' * 32, 'changed_chats': 1}
             receiver.result = {'state': 'PENDING', 'mock_only': False, 'restore_event': partial}

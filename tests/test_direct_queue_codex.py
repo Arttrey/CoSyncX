@@ -187,7 +187,11 @@ raise SystemExit(1)
             finally:
                 stop_server(server)
             with patch('cosync_direct_restore.quiescence.is_quiet', return_value=interrupt in ('write', 'write-concurrent-change')):
-                result = poll(3)
+                if interrupt not in ('write', 'write-concurrent-change'):
+                    self.assertEqual(poll(61)['state'], 'PENDING')
+                    result = poll(62)
+                else:
+                    result = poll(3)
                 if interrupt == 'write-concurrent-change':
                     self.assertEqual(result['state'], 'PENDING')
                     self.assertTrue((backup / 'direct-restore-pending.json').is_file())

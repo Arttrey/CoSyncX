@@ -50,6 +50,8 @@ function activate(context) {
             const labels = {
                 TRANSFERRING: ['$(sync~spin) CoSyncX: syncing chats',
                     'Chat files are being transferred. Some chats may be out of date; you can keep working.'],
+                CHECKING: ['$(sync~spin) CoSyncX: checking chats',
+                    'CoSyncX is checking received chats. You can keep working.'],
                 RESTORING: ['$(sync~spin) CoSyncX: syncing chats',
                     'CoSyncX is checking and restoring chats. Some chats may be out of date; you can keep working.'],
                 PENDING: ['$(warning) CoSyncX: chats pending',

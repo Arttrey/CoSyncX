@@ -46,8 +46,11 @@ Cursor and Codex to close. Keep a backup before enabling concurrent use.
 explicitly configured as send-and-receive. It does not configure Syncthing,
 export local chats, or resolve conflicting versions.
 The opt-in `--prefer-more-messages` restore policy selects the history with
-more visible user and assistant messages. A tie with different messages,
-unsupported content, unavailable workspace, or active writer is deferred.
+more visible user and assistant messages. For an existing chat, an unavailable
+source workspace can use that chat's already configured, available local
+workspace; historical paths are preserved. A tie with different messages,
+unsupported content, unavailable workspace for a new chat, or active writer
+is deferred.
 `python -m cosync_publish_chat` experimentally publishes one existing local
 history to its matching exchange file. The `--replace-initial` flag explicitly
 permits the first replacement; one previous exchange version is kept in a

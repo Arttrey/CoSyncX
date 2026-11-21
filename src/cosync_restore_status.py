@@ -45,7 +45,7 @@ def read_status(path: Path, *, mock_only: bool, max_age_ms: int | None = 90000) 
                 or value.get('mock_only') is not mock_only or type(value.get('updated_at_ms')) is not int
                 or value['updated_at_ms'] > now + 5000
                 or (max_age_ms is not None and now - value['updated_at_ms'] > max_age_ms)
-                or value.get('state') not in {'TRANSFERRING', 'RESTORING', 'PENDING', 'COMPLETE', 'ERROR'}):
+                or value.get('state') not in {'TRANSFERRING', 'CHECKING', 'RESTORING', 'PENDING', 'COMPLETE', 'ERROR'}):
             return None
         event = value.get('restore_event')
         if event is not None and not _valid_event(event, mock_only):
@@ -57,7 +57,7 @@ def read_status(path: Path, *, mock_only: bool, max_age_ms: int | None = 90000) 
 
 def write_status(path: Path, state: str, *, mock_only: bool, event: dict | None = None,
                  missing_path_chats: int = 0, missing_path_report: str | None = None) -> None:
-    if (not path.is_absolute() or state not in {'TRANSFERRING', 'RESTORING', 'PENDING', 'COMPLETE', 'ERROR'}
+    if (not path.is_absolute() or state not in {'TRANSFERRING', 'CHECKING', 'RESTORING', 'PENDING', 'COMPLETE', 'ERROR'}
             or type(mock_only) is not bool):
         raise StatusError('Invalid status')
     if event is not None:

@@ -30,10 +30,34 @@ class RestoreSupervisor:
                             missing_path_chats=count, missing_path_report=report)
 
     def tick(self):
+        stop_heartbeat = threading.Event()
+        state_lock = threading.Lock()
+        working_state = [None]
+        heartbeat = None
+        def update_working(state):
+            nonlocal heartbeat
+            with state_lock:
+                working_state[0] = state
+                self._publish(state)
+            if heartbeat is None:
+                def refresh():
+                    while not stop_heartbeat.wait(20):
+                        try:
+                            with state_lock:
+                                if working_state[0] is not None:
+                                    self._publish(working_state[0])
+                        except (status.StatusError, OSError, ValueError):
+                            pass
+                heartbeat = threading.Thread(target=refresh, daemon=True)
+                heartbeat.start()
         try:
             result = self.receiver.poll(self.chat_reader, title_status_reader=self.title_reader,
                                         graph_status_reader=self.graph_reader,
-                                        on_restore=lambda: self._publish('RESTORING'))
+                                        on_check=lambda: update_working('CHECKING'),
+                                        on_restore=lambda: update_working('RESTORING'))
+            stop_heartbeat.set()
+            if heartbeat is not None:
+                heartbeat.join()
             if not isinstance(result, dict) or result.get('mock_only') is not self.mock_only:
                 raise ValueError('Receiver mode mismatch')
             state, event = result.get('state'), result.get('restore_event')
@@ -58,11 +82,18 @@ class RestoreSupervisor:
                 raise ValueError('Invalid receiver state')
             return result
         except Exception:
+            stop_heartbeat.set()
+            if heartbeat is not None:
+                heartbeat.join()
             try:
                 self._publish('ERROR')
             except (status.StatusError, OSError, ValueError):
                 pass
             return {'state': 'ERROR', 'mock_only': self.mock_only}
+        finally:
+            stop_heartbeat.set()
+            if heartbeat is not None:
+                heartbeat.join()
 
     def run(self, stop: threading.Event, interval: float):
         if not 0.2 <= interval <= 60:

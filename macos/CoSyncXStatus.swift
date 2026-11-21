@@ -45,6 +45,7 @@ class StatusApp: NSObject, NSApplicationDelegate {
                 let labels: [String: (String, String)] = [
                     "TRANSFERRING": ("CoSyncX: transferring", "Chat files are being transferred through Syncthing."),
                     "TRANSFERRED": ("CoSyncX: files received", "Transfer complete; chat restoration is not confirmed."),
+                    "CHECKING": ("CoSyncX: checking chats", "CoSyncX is checking received chats."),
                     "RESTORING": ("CoSyncX: restoring", "CoSyncX is restoring chats and updating their index."),
                     "RESTORED": ("CoSyncX: restored", "Chat restoration and indexing have been confirmed."),
                     "PENDING": ("CoSyncX: awaiting restore", "Restoration is pending, for example while Cursor is open or a chat conflict needs attention."),

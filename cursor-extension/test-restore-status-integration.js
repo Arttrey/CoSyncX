@@ -77,6 +77,11 @@ const waitFor = async predicate => {
         await waitFor(() => statusItem.text === '$(sync~spin) CoSyncX: syncing chats');
         assert.ok(statusItem.tooltip.includes('may be out of date'));
         assert.strictEqual(calls.length, 2);
+        fs.writeFileSync(file, JSON.stringify({format: 'cosyncx-restore-status-v1', updated_at_ms: Date.now(),
+            mock_only: false, state: 'CHECKING', restore_event: later}));
+        refresh();
+        await waitFor(() => statusItem.text === '$(sync~spin) CoSyncX: checking chats');
+        assert.strictEqual(calls.length, 2);
         console.log('Cursor status-to-reload integration: OK');
     } finally {
         for (const item of context.subscriptions) if (item && item.dispose) item.dispose();

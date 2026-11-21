@@ -28,6 +28,8 @@ class TransferStatusTests(unittest.TestCase):
             file = Path(tmp).resolve() / 'status.json'
             write_status(file, 'COMPLETE', mock_only=False)
             self.assertEqual(restore_status(file), 'TRANSFERRED')
+            write_status(file, 'CHECKING', mock_only=False)
+            self.assertEqual(restore_status(file), 'CHECKING')
             event = {'id': 'a' * 32, 'state': 'RESTORED', 'indexed': True,
                      'changed_chats': 1, 'mock_only': False}
             write_status(file, 'COMPLETE', mock_only=False, event=event)
