@@ -53,5 +53,37 @@ class PublishChatTests(unittest.TestCase):
             self.assertEqual(publish(src, dst, state, replace_initial=True), 'CONFLICT')
             self.assertEqual(dst.read_text(), '{"msg":"remote"}\n')
 
+    def test_prefer_local_preserves_remote_only_changes_and_resolves_divergence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source, exchange, state = (root / x for x in ('source', 'exchange', 'state'))
+            for directory in (source, exchange, state): directory.mkdir(mode=0o700)
+            name = 'rollout-2026-01-01T00-00-00-019b0000-0000-7000-8000-000000000001.jsonl'
+            src, dst = source / name, exchange / name
+            common = '{"msg":"common"}\n'
+            src.write_text(common); dst.write_text(common)
+            args = {'prefer_local': True, 'path_roots': ('/local/Nexus', '/remote/Nexus')}
+            self.assertEqual(publish(src, dst, state, replace_initial=True, **args), 'UNCHANGED')
+            dst.write_text(common + '{"msg":"remote"}\n')
+            self.assertEqual(publish(src, dst, state, **args), 'WAITING_REMOTE')
+            src.write_text(common + '{"msg":"local"}\n')
+            self.assertEqual(publish(src, dst, state, **args), 'PUBLISHED')
+            self.assertIn('local', dst.read_text())
+            self.assertIn('remote', (state / 'latest.jsonl').read_text())
+
+    def test_prefer_local_does_not_republish_equivalent_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source, exchange, state = (root / x for x in ('source', 'exchange', 'state'))
+            for directory in (source, exchange, state): directory.mkdir(mode=0o700)
+            name = 'rollout-2026-01-01T00-00-00-019b0000-0000-7000-8000-000000000001.jsonl'
+            src, dst = source / name, exchange / name
+            src.write_text(json.dumps({'type': 'session_meta', 'payload': {'cwd': '/local/Nexus'}}) + '\n')
+            dst.write_text(json.dumps({'type': 'session_meta', 'payload': {'cwd': '/remote/Nexus'}}) + '\n')
+            args = {'prefer_local': True, 'path_roots': ('/local/Nexus', '/remote/Nexus')}
+            self.assertEqual(publish(src, dst, state, replace_initial=True, **args), 'UNCHANGED')
+            self.assertEqual(publish(src, dst, state, **args), 'UNCHANGED')
+            self.assertIn('/remote/Nexus', dst.read_text())
+
 
 if __name__ == '__main__': unittest.main()

@@ -51,7 +51,12 @@ permits the first replacement; one previous exchange version is kept in a
 private state directory. Subsequent unexpected exchange changes are reported
 as conflicts. `python -m cosync_publish_title` can similarly publish the title
 of one selected chat while preserving other titles. These tools do not export
-other chats or relationships.
+other chats or relationships. The experimental `cosync_publish_batch` worker
+can publish an explicitly configured set of single-page histories and their
+titles. It defers histories with multiple pages or externally referenced pages;
+it does not discover new chats or export relationships. A separate guarded
+multi-page replacement helper preserves previous pages and requires the
+exchange folder to be paused.
 An indexed restore keeps its reload event until the status is published. An
 interrupted indexing pass retains its authenticated metadata so it can finish
 before a newer source revision is processed, provided the local state has not

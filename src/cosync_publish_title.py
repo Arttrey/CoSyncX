@@ -1,5 +1,6 @@
 """Publish one selected chat title without replacing unrelated titles."""
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -24,7 +25,24 @@ def _atomic(path: Path, data: bytes, temporary_dir: Path) -> None:
         if os.path.exists(name): os.unlink(name)
 
 
-def publish_title(source: Path, destination: Path, state_dir: Path, thread_id: str, *, replace_initial=False) -> str:
+@contextmanager
+def _title_lock(path: Path):
+    if not path.is_absolute() or path.is_symlink() or not path.parent.is_dir() or path.parent.is_symlink():
+        raise ns.SyncError('Invalid title coordination path')
+    if os.name != 'nt' and (path.parent.stat().st_uid != os.getuid() or stat.S_IMODE(path.parent.stat().st_mode) & 0o022):
+        raise ns.SyncError('Title coordination directory is not private')
+    import fcntl
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): raise ns.SyncError('Invalid title coordination file')
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        os.close(fd)
+
+
+def publish_title(source: Path, destination: Path, state_dir: Path, thread_id: str, *, replace_initial=False,
+                  prefer_local=False, lock_file: Path | None = None) -> str:
     source, destination, state_dir = map(Path, (source, destination, state_dir))
     try:
         if str(uuid.UUID(thread_id)) != thread_id: raise ValueError()
@@ -38,6 +56,13 @@ def publish_title(source: Path, destination: Path, state_dir: Path, thread_id: s
             or state_dir.resolve() in (source.parent.resolve(), destination.parent.resolve())
             or destination.parent.resolve() in state_dir.resolve().parents):
         raise ns.SyncError('Invalid title publication paths')
+    if lock_file is not None:
+        lock_file = Path(lock_file)
+        if lock_file.parent.resolve() == destination.parent.resolve():
+            raise ns.SyncError('Title lock cannot be in the exchange folder')
+        with _title_lock(lock_file):
+            return publish_title(source, destination, state_dir, thread_id, replace_initial=replace_initial,
+                                 prefer_local=prefer_local)
     if os.name != 'nt' and (state_dir.stat().st_uid != os.getuid() or stat.S_IMODE(state_dir.stat().st_mode) & 0o077):
         raise ns.SyncError('Title state directory must be private')
     state_file, backup = state_dir / 'state.json', state_dir / 'latest.jsonl'
@@ -55,7 +80,9 @@ def publish_title(source: Path, destination: Path, state_dir: Path, thread_id: s
     if not source_records: return 'WAITING'
     remote_name = dest_records[-1]['thread_name'] if dest_records else None
     local_record = source_records[-1]
-    if previous and remote_name != previous['name']: return 'CONFLICT'
+    if previous and remote_name != previous['name']:
+        if not prefer_local: return 'CONFLICT'
+        if local_record['thread_name'] == previous['name']: return 'WAITING_REMOTE'
     if previous is None and not replace_initial: return 'NEEDS_INITIAL_APPROVAL'
     changed = remote_name != local_record['thread_name']
     if changed:
@@ -77,13 +104,16 @@ def main():
     parser.add_argument('--state-dir', required=True, type=Path)
     parser.add_argument('--thread-id', required=True)
     parser.add_argument('--replace-initial', action='store_true')
+    parser.add_argument('--prefer-local', action='store_true')
+    parser.add_argument('--lock-file', type=Path)
     parser.add_argument('--interval', type=int, default=30)
     args = parser.parse_args()
     if not 10 <= args.interval <= 3600: parser.error('Invalid interval')
     while True:
         try:
             result = publish_title(args.source, args.destination, args.state_dir, args.thread_id,
-                                   replace_initial=args.replace_initial)
+                                   replace_initial=args.replace_initial, prefer_local=args.prefer_local,
+                                   lock_file=args.lock_file)
         except (OSError, ValueError, ns.SyncError):
             result = 'RETRY'
         try:

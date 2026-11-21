@@ -14,7 +14,8 @@ import nexus_sync as ns
 _NAME = re.compile(r'^rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$')
 
 
-def publish(source: Path, destination: Path, state_dir: Path, *, replace_initial: bool = False) -> str:
+def publish(source: Path, destination: Path, state_dir: Path, *, replace_initial: bool = False,
+            prefer_local: bool = False, path_roots: tuple[str, str] | None = None) -> str:
     """Copy a complete stable history; retain one backup and defer conflicts."""
     source, destination, state_dir = map(Path, (source, destination, state_dir))
     if not all(p.is_absolute() for p in (source, destination, state_dir)):
@@ -39,8 +40,11 @@ def publish(source: Path, destination: Path, state_dir: Path, *, replace_initial
             raise ns.SyncError('Invalid publication state')
         if not isinstance(previous['digest'], str) or not re.fullmatch(r'[0-9a-f]{64}', previous['digest']):
             raise ns.SyncError('Invalid publication digest')
+    if prefer_local and (not isinstance(path_roots, tuple) or len(path_roots) != 2
+                         or any(not isinstance(root, str) or not root for root in path_roots)):
+        raise ns.SyncError('Path roots required for local conflict preference')
     before = ns._digest(destination)
-    if previous and before != previous['digest']:
+    if previous and before != previous['digest'] and not prefer_local:
         return 'CONFLICT'
     if previous is None and not replace_initial:
         return 'NEEDS_INITIAL_APPROVAL'
@@ -48,7 +52,16 @@ def publish(source: Path, destination: Path, state_dir: Path, *, replace_initial
         snapshot, old = Path(tmp) / 'new.jsonl', Path(tmp) / 'old.jsonl'
         ns._copy_stable_chat(source, snapshot)
         digest = ns._digest(snapshot)
+        if prefer_local and previous and before != previous['digest'] and digest == previous['digest']:
+            return 'WAITING_REMOTE'
         changed = digest != before
+        if changed and prefer_local:
+            relation = ns._path_adjusted_relation(snapshot, destination, *path_roots)
+            if relation == 'EQUIVALENT_AFTER_PATH_MAPPING':
+                changed = False
+                digest = before
+            elif previous and before != previous['digest'] and relation == 'LOCAL_EXTENDS_AFTER_PATH_MAPPING':
+                return 'WAITING_REMOTE'
         if changed:
             ns._copy_stable_chat(destination, old)
             if ns._digest(old) != before or ns._digest(destination) != before:
@@ -79,14 +92,30 @@ def main():
     parser.add_argument('--destination', required=True, type=Path)
     parser.add_argument('--state-dir', required=True, type=Path)
     parser.add_argument('--replace-initial', action='store_true')
+    parser.add_argument('--prefer-local', action='store_true')
+    parser.add_argument('--path-roots', nargs=2, metavar=('LOCAL_ROOT', 'REMOTE_ROOT'))
     parser.add_argument('--interval', type=int, default=30)
     args = parser.parse_args()
     if not 10 <= args.interval <= 3600:
         parser.error('Interval must be between 10 and 3600 seconds')
+    last_fingerprint = None
+    last_result = None
     while True:
         reason = None
         try:
-            result = publish(args.source, args.destination, args.state_dir, replace_initial=args.replace_initial)
+            def fingerprint(path):
+                value = path.stat()
+                return (value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+            current_fingerprint = (fingerprint(args.source), fingerprint(args.destination))
+            if current_fingerprint == last_fingerprint and last_result in ('UNCHANGED', 'PUBLISHED', 'WAITING_REMOTE', 'CONFLICT'):
+                result = 'UNCHANGED' if last_result == 'PUBLISHED' else last_result
+            else:
+                result = publish(args.source, args.destination, args.state_dir, replace_initial=args.replace_initial,
+                                 prefer_local=args.prefer_local,
+                                 path_roots=tuple(args.path_roots) if args.path_roots else None)
+            after_fingerprint = (fingerprint(args.source), fingerprint(args.destination))
+            last_fingerprint = after_fingerprint if current_fingerprint[0] == after_fingerprint[0] else None
+            last_result = result
         except ns.SyncError as exc:
             result = 'RETRY'
             reason = ('SOURCE_CHANGED' if 'изменилась во время копирования' in str(exc) else
