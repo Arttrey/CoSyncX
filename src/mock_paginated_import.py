@@ -46,6 +46,11 @@ def _expected_visible_messages(path: Path, *, subagent: bool = False) -> Counter
                 continue
             if number == 0 and subagent:
                 start_ordinal = payload.get('subagent_history_start_ordinal')
+                # Some standalone subagent rollouts have no inherited-history
+                # boundary. Compare their actual records from the beginning;
+                # the Codex response still has to contain the expected items.
+                if start_ordinal is None:
+                    start_ordinal = 0
                 if type(start_ordinal) is not int or start_ordinal < 0:
                     raise ns.SyncError('Mock subagent history boundary is unavailable')
             if subagent and number > 0:
@@ -141,7 +146,17 @@ def prepare_flattened_mock(source: Path, destination: Path, thread_id: str,
     external references to physical pages and future updates need validation.
     """
     source, destination = mock._mock_path(source), mock._mock_path(destination)
+    return _prepare_flattened(source, destination, thread_id, mappings, fallback_root=fallback_root)
+
+
+def _prepare_flattened(source: Path, destination: Path, thread_id: str,
+                       mappings: list[tuple[str, str]], *, fallback_root: Path | None = None) -> int:
+    """Prepare a lineage only in a new temporary directory; source is read-only."""
+    source = source.resolve(strict=True)
+    destination = destination.parent.resolve(strict=True) / destination.name
+    temporary = Path(tempfile.gettempdir()).resolve(strict=True)
     if (not source.is_dir() or destination.exists() or destination.is_symlink()
+            or temporary not in destination.parents or '.codex' in {p.casefold() for p in destination.parts}
             or source in destination.parents or destination in source.parents):
         raise ns.SyncError('Mock flatten directories overlap')
     with tempfile.TemporaryDirectory(prefix='cosyncx-flat-stage-') as temp:

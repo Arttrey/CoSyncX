@@ -11,10 +11,68 @@ from unittest.mock import patch
 
 from cosync_direct_restore import DirectReceiver
 from cosync_restore_supervisor import RestoreSupervisor
+import nexus_sync as ns
 from test_codex_contract import read_rpc_response, stop_server
 
 
 class DirectRestoreTests(unittest.TestCase):
+    def test_multipage_source_with_external_page_reference_is_deferred(self):
+        with tempfile.TemporaryDirectory(prefix='cosyncx-page-reference-') as tmp:
+            root = Path(tmp).resolve()
+            source, titles, graph, profile, backups, project = (root / name for name in
+                ('source', 'titles', 'graph', 'profile', 'backups', 'project'))
+            for path in (source, titles, graph, profile, backups, project):
+                path.mkdir(mode=0o700)
+            folder = source / 'sessions'; folder.mkdir()
+            parent = '019b0000-0000-7000-8000-000000000031'
+            page = '019b0000-0000-7000-8000-000000000032'
+            child = '019b0000-0000-7000-8000-000000000033'
+            meta = {'id': parent, 'timestamp': '2026-01-01T00:00:00.000Z', 'cwd': '/source/Nexus',
+                    'originator': 'codex_vscode', 'cli_version': '0.1.0', 'source': 'vscode',
+                    'model_provider': 'openai', 'history_mode': 'paginated'}
+            first = folder / f'rollout-2026-01-01T00-00-00-{parent}.jsonl'
+            first.write_text(json.dumps({'timestamp': meta['timestamp'], 'type': 'session_meta',
+                                         'payload': meta, 'ordinal': 0}) + '\n')
+            second = folder / f'rollout-2026-01-01T00-00-00-{parent}_{page}.jsonl'
+            second_meta = dict(meta, history_base={'thread_id': parent, 'end_byte_offset': first.stat().st_size,
+                                                   'end_ordinal_exclusive': 1})
+            second.write_text(json.dumps({'timestamp': meta['timestamp'], 'type': 'session_meta',
+                                          'payload': second_meta, 'ordinal': 1}) + '\n')
+            child_meta = dict(meta, id=child, source={'subagent': {'other': 'guardian'}}, parent_thread_id=parent,
+                              history_base={'thread_id': page, 'end_byte_offset': second.stat().st_size,
+                                            'end_ordinal_exclusive': 2})
+            (folder / f'rollout-2026-01-01T00-00-00-{child}.jsonl').write_text(
+                json.dumps({'timestamp': meta['timestamp'], 'type': 'session_meta', 'payload': child_meta,
+                            'ordinal': 2}) + '\n')
+            (titles / 'session_index.jsonl').write_text(json.dumps({'id': parent, 'thread_name': 'test'}) + '\n')
+            (graph / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1', 'edges': [],
+                'omitted_missing': 0, 'omitted_archived': 0}))
+            receiver = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
+                backup_root=backups, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
+                codex=Path(sys.executable), folder_ids=('sessions', 'titles', 'graph'), peer_id='vps')
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True):
+                self.assertIsNone(receiver._receive())
+            self.assertFalse((profile / 'sessions').exists())
+            self.assertFalse((backups / 'latest').exists())
+
+    def test_metadata_can_be_sibling_folders_under_source_but_not_inside_sessions(self):
+        with tempfile.TemporaryDirectory(prefix='cosyncx-direct-layout-') as tmp:
+            root = Path(tmp).resolve()
+            source, profile, backups, project = (root / name for name in ('source', 'profile', 'backups', 'project'))
+            for path in (source, profile, backups, project):
+                path.mkdir(mode=0o700)
+            sessions, titles, graph = (source / name for name in ('sessions', 'titles', 'graph'))
+            for path in (sessions, titles, graph):
+                path.mkdir()
+            args = dict(source=source, titles=titles, graph=graph, profile=profile, backup_root=backups,
+                        key=b'k' * 32, mappings=[('/source/Nexus', str(project))], codex=Path(sys.executable),
+                        folder_ids=('sessions', 'titles', 'graph'), peer_id='vps')
+            DirectReceiver(**args)
+            nested = sessions / 'titles'
+            nested.mkdir()
+            with self.assertRaises(ns.SyncError):
+                DirectReceiver(**{**args, 'titles': nested})
+
     def test_existing_archived_history_is_not_made_active(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-keep-archive-') as tmp:
             root = Path(tmp).resolve()
@@ -49,6 +107,12 @@ class DirectRestoreTests(unittest.TestCase):
                                             'parent_thread_id': thread})
             child_file = active / f'rollout-2026-01-01T00-00-00-{child_thread}.jsonl'
             child_file.write_text(json.dumps(child_record) + '\n')
+            orphan_thread = '019b0000-0000-7000-8000-000000000024'
+            orphan = json.loads(record('/source/Nexus'))
+            orphan['payload'].update({'id': orphan_thread, 'source': {'subagent': {'other': 'guardian'}},
+                'parent_thread_id': '019b0000-0000-7000-8000-000000000099'})
+            orphan_file = active / f'rollout-2026-01-01T00-00-00-{orphan_thread}.jsonl'
+            orphan_file.write_text(json.dumps(orphan) + '\n')
             (graph / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1',
                 'edges': [{'parent': thread, 'child': child_thread, 'status': 'closed'}],
                 'omitted_missing': 0, 'omitted_archived': 0}))
@@ -69,6 +133,7 @@ class DirectRestoreTests(unittest.TestCase):
             self.assertTrue((profile / 'sessions' / new_file.name).is_file())
             self.assertFalse((profile / 'sessions' / filename).exists())
             self.assertFalse((profile / 'sessions' / child_file.name).exists())
+            self.assertFalse((profile / 'sessions' / orphan_file.name).exists())
 
     def test_waits_for_syncthing_and_idle_profile_then_imports_and_confirms_index(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-direct-real-test-') as tmp:
@@ -308,8 +373,7 @@ class DirectRestoreTests(unittest.TestCase):
                 env={**os.environ, 'CODEX_HOME': str(child_home)}, capture_output=True, timeout=30)
             self.assertEqual(migrated.returncode, 0, migrated.stderr.decode(errors='replace'))
             child_rows = [json.loads(line) for line in child_build.read_text().splitlines()]
-            child_rows[0]['payload']['subagent_history_start_ordinal'] = next(
-                row['ordinal'] for row in child_rows if row['type'] == 'response_item')
+            child_rows[0]['payload'].pop('subagent_history_start_ordinal', None)
             child_path.write_text(''.join(json.dumps(row) + '\n' for row in child_rows))
             (graph / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1',
                 'edges': [{'parent': thread, 'child': child, 'status': 'closed'}],
@@ -322,6 +386,63 @@ class DirectRestoreTests(unittest.TestCase):
             with sqlite3.connect(profile / 'state_5.sqlite') as db:
                 self.assertEqual(db.execute('SELECT parent_thread_id, status FROM thread_spawn_edges WHERE child_thread_id=?',
                                             (child,)).fetchone(), (thread, 'closed'))
+            graph_record = json.loads(journal.read_text())
+            with_graph.acknowledge({'id': graph_record['event_id'], 'indexed': True, 'changed_chats': 2})
+            multi = '019b0000-0000-7000-8000-000000000013'
+            page = '019b0000-0000-7000-8000-000000000014'
+            multi_home = root / 'multi-build'
+            (multi_home / 'sessions').mkdir(parents=True)
+            base_name = f'rollout-2026-01-01T00-00-00-{multi}'
+            multi_build = multi_home / 'sessions' / (base_name + '.jsonl')
+            multi_meta = dict(meta, id=multi)
+            multi_rows = [{'timestamp': '2026-01-01T00:00:00.000Z', 'type': 'session_meta', 'payload': multi_meta}]
+            for number in (1, 2, 3):
+                stamp, message = f'2026-01-01T00:0{number}:00.000Z', f'page message {number}'
+                multi_rows += [{'timestamp': stamp, 'type': 'response_item', 'payload':
+                                {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': message}]}},
+                               {'timestamp': stamp, 'type': 'event_msg', 'payload':
+                                {'type': 'user_message', 'message': message, 'images': [], 'local_images': [], 'text_elements': []}}]
+            multi_build.write_text(''.join(json.dumps(row) + '\n' for row in multi_rows))
+            migrated = subprocess.run([codex, 'migrate-rollouts', '--apply', '--json'],
+                env={**os.environ, 'CODEX_HOME': str(multi_home)}, capture_output=True, timeout=30)
+            self.assertEqual(migrated.returncode, 0)
+            rows = [json.loads(line) for line in multi_build.read_text().splitlines()]
+            prefix, suffix = rows[:4], rows[4:]
+            first_page = folder / (base_name + '.jsonl')
+            first_page.write_text(''.join(json.dumps(row) + '\n' for row in prefix))
+            header = dict(prefix[0]); header['ordinal'] = 4
+            header['payload'] = dict(prefix[0]['payload'], history_base={
+                'thread_id': multi, 'end_byte_offset': first_page.stat().st_size, 'end_ordinal_exclusive': 4})
+            for row in suffix:
+                row['ordinal'] += 1
+            page_later = [row for row in suffix if row.get('timestamp', '') >= '2026-01-01T00:03']
+            suffix = [row for row in suffix if row not in page_later]
+            self.assertTrue(page_later)
+            second_page = folder / (base_name + '_' + page + '.jsonl')
+            second_page.write_text(''.join(json.dumps(row) + '\n' for row in [header, *suffix]))
+            with (titles / 'session_index.jsonl').open('a') as out:
+                out.write(json.dumps({'id': multi, 'thread_name': 'Multi'}) + '\n')
+            multi_receiver = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
+                backup_root=backups, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
+                codex=Path(codex), folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0)
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True):
+                self.assertEqual(multi_receiver._receive(), 1)
+            imported = next((profile / 'sessions').rglob(base_name + '.jsonl')).read_bytes()
+            self.assertIn(b'page message 1', imported)
+            self.assertIn(b'page message 2', imported)
+            self.assertNotIn(b'page message 3', imported)
+            multi_record = json.loads(journal.read_text())
+            multi_receiver.acknowledge({'id': multi_record['event_id'], 'indexed': True, 'changed_chats': 1})
+            with second_page.open('a') as out:
+                out.write(''.join(json.dumps(row) + '\n' for row in page_later))
+            updated_multi = DirectReceiver(source=source, titles=titles, graph=graph, profile=profile,
+                backup_root=backups, key=b'k' * 32, mappings=[('/source/Nexus', str(project))],
+                codex=Path(codex), folder_ids=('sessions', 'titles', 'graph'), peer_id='vps', quiet_seconds=0)
+            with patch('cosync_direct_restore.quiescence.is_quiet', return_value=True):
+                self.assertEqual(updated_multi._receive(), 1)
+            multi_path = next((profile / 'sessions').rglob(base_name + '.jsonl'))
+            self.assertIn(b'page message 3', multi_path.read_bytes())
+            self.assertEqual((backups / 'latest' / multi_path.relative_to(profile)).read_bytes(), imported)
 
 
 if __name__ == '__main__':

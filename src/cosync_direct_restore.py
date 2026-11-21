@@ -1,4 +1,4 @@
-"""Guarded direct-folder receiver for previously absent, single-page chats.
+"""Guarded direct-folder receiver for active chats.
 
 Archived IDs, graphs and unavailable paths are left pending. Existing active
 versions are backed up before replacement. No profile write is attempted
@@ -37,10 +37,16 @@ class DirectReceiver:
                  key: bytes, mappings: list[tuple[str, str]], codex: Path, folder_ids: tuple[str, str, str],
                  peer_id: str, quiet_seconds: float = 5):
         paths = [Path(x).resolve(strict=True) for x in (source, titles, graph, profile, backup_root)]
-        if (any(not p.is_dir() for p in paths) or any(a == b or a in b.parents or b in a.parents
-                for i, a in enumerate(paths) for b in paths[i + 1:]) or len(key) != 32 or not mappings):
+        if any(not p.is_dir() for p in paths) or len(key) != 32 or not mappings:
             raise ns.SyncError('Invalid direct receiver configuration')
         self.source, self.titles, self.graph, self.profile, self.backup_root = paths
+        sessions = (self.source / 'sessions').resolve(strict=True)
+        independent = (sessions, self.titles, self.graph, self.profile, self.backup_root)
+        if (any(a == b or a in b.parents or b in a.parents for i, a in enumerate(independent)
+                for b in independent[i + 1:]) or any(
+                item == self.source or item in self.source.parents or self.source in item.parents
+                for item in (self.profile, self.backup_root))):
+            raise ns.SyncError('Overlapping direct receiver directories')
         info = self.backup_root.stat()
         if os.name != 'nt' and (info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077):
             raise ns.SyncError('Backup directory must be private')
@@ -127,6 +133,7 @@ class DirectReceiver:
             return None
         names = {entry['id']: entry['thread_name'] for entry in ns._parse_title_index(title_bytes)}
         incoming = ns._chat_catalog(self.source, include_unsupported=True)
+        all_incoming = dict(incoming)
         local = ns._chat_catalog(self.profile, include_unsupported=True)
         # A locally archived conversation stays archived even when the source
         # has an active copy. It and its dependent children must not block
@@ -139,6 +146,10 @@ class DirectReceiver:
                 if folders != {'archived_sessions'}:
                     return None
                 skipped.add(identity)
+        source_kinds = {identity: cosync_receive_plan.source_kind(entries) for identity, entries in incoming.items()}
+        for identity, entries in incoming.items():
+            if source_kinds[identity] == 'subagent' and entries[0].get('parent_thread_id') not in incoming:
+                skipped.add(identity)
         while True:
             dependent = {identity for identity, entries in incoming.items()
                          if identity not in skipped and any(item.get('parent_thread_id') in skipped for item in entries)}
@@ -146,7 +157,9 @@ class DirectReceiver:
                 break
             skipped.update(dependent)
         incoming = {identity: entries for identity, entries in incoming.items() if identity not in skipped}
-        kinds = {identity: cosync_receive_plan.source_kind(entries) for identity, entries in incoming.items()}
+        kinds = {identity: source_kinds[identity] for identity in incoming}
+        if any(kind not in ('chat', 'subagent') for kind in kinds.values()):
+            return None
         edges, seen_children = [], set()
         for edge in graph['edges']:
             if (not isinstance(edge, dict) or set(edge) != {'parent', 'child', 'status'}
@@ -162,11 +175,32 @@ class DirectReceiver:
             edges.append(edge)
         for identity, entries in incoming.items():
             if (kinds[identity] == 'subagent' and
-                    kinds.get(entries[0].get('parent_thread_id')) != 'chat'):
+                    kinds.get(entries[0].get('parent_thread_id')) not in ('chat', 'subagent')):
                 return None
             if kinds[identity] == 'chat' and not names.get(identity):
                 return None
-        fingerprints = {identity: ns._digest(entries[0]['path']) for identity, entries in incoming.items() if len(entries) == 1}
+        depth = {}
+        for identity in incoming:
+            chain, visited, node = [], set(), identity
+            while node not in depth:
+                if node in visited:
+                    raise ns.SyncError('Cyclic active subagent relationship')
+                visited.add(node)
+                chain.append(node)
+                if kinds[node] == 'chat':
+                    break
+                node = incoming[node][0].get('parent_thread_id')
+            base = depth[node] if node in depth else -1
+            for item in reversed(chain):
+                base += 1
+                depth[item] = base
+        fingerprints = {}
+        for identity, entries in incoming.items():
+            if len(entries) == 1:
+                fingerprints[identity] = ns._digest(entries[0]['path'])
+            else:
+                fingerprints[identity] = [[item['path'].relative_to(self.source).as_posix(), ns._digest(item['path'])]
+                                          for item in sorted(entries, key=lambda item: str(item['path']))]
         if prior is not None:
             latest = self.backup_root / 'latest'
             manifest = latest / 'manifest.json'
@@ -192,7 +226,7 @@ class DirectReceiver:
                     or not set(prior['threads']) <= set(fingerprints)
                     or not isinstance(prior.get('event_id'), str) or len(prior['event_id']) != 32):
                 return None
-            ordered = sorted(fingerprints, key=lambda identity: (kinds[identity] != 'chat', identity))
+            ordered = sorted(fingerprints, key=lambda identity: (depth[identity], identity))
             for identity in ordered:
                 current = local.get(identity, [])
                 item = prior['verified'].get(identity)
@@ -221,10 +255,22 @@ class DirectReceiver:
             local_titles = ({entry['id']: entry['thread_name'] for entry in ns._parse_title_index(local_titles_data)}
                             if local_titles_data is not None else {})
             for number, (identity, entries) in enumerate(sorted(incoming.items())):
-                if len(entries) != 1 or kinds[identity] not in ('chat', 'subagent'):
+                if not entries or kinds[identity] not in ('chat', 'subagent'):
                     return None
                 stage = Path(temp).resolve() / str(number)
-                lineage.prepare_lineage(self.source, stage, identity, self.mappings)
+                if len(entries) == 1:
+                    lineage.prepare_lineage(self.source, stage, identity, self.mappings)
+                else:
+                    if kinds[identity] != 'chat':
+                        return None
+                    page_ids = {lineage._page_id(item['path'], identity) for item in entries}
+                    for other, other_entries in all_incoming.items():
+                        if other == identity:
+                            continue
+                        if any(isinstance(item.get('history_base'), dict) and
+                               item['history_base'].get('thread_id') in page_ids for item in other_entries):
+                            return None
+                    indexer._prepare_flattened(self.source, stage, identity, self.mappings)
                 if (stage / 'cosyncx-path-report.json').exists():
                     return None
                 staged = ns._chat_catalog(stage, include_unsupported=True).get(identity, [])
@@ -265,7 +311,7 @@ class DirectReceiver:
                     return None
             if not prepared and not recheck and not graph_changed:
                 return 0
-            prepared.sort(key=lambda entry: (kinds[entry[0]] != 'chat', entry[0]))
+            prepared.sort(key=lambda entry: (depth[entry[0]], entry[0]))
             db_paths = {p for pattern in ('state_*.sqlite', 'thread_history_*.sqlite')
                         for p in self.profile.glob(pattern)}
             if any(p.is_symlink() or not p.is_file() for p in db_paths):
@@ -361,7 +407,7 @@ class DirectReceiver:
                         for identity, item in self.verified.items() if identity in incoming}
             to_index = [(identity, title) for identity, _, _, title in prepared]
             to_index += [(identity, title) for identity, _, title, _, _, _ in recheck]
-            to_index.sort(key=lambda item: (kinds[item[0]] != 'chat', item[0]))
+            to_index.sort(key=lambda item: (depth[item[0]], item[0]))
             for identity, title in to_index:
                 if not quiescence.is_quiet():
                     raise ns.SyncError('Codex started during direct restore')
