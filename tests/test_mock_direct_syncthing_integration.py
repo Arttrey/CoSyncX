@@ -38,6 +38,11 @@ class DirectSyncthingIntegrationTests(unittest.TestCase):
             received.mkdir(parents=True)
             titles_received = root / 'received-titles'
             titles_received.mkdir()
+            graph_source, graph_received = root / 'sender-graph', root / 'received-graph'
+            graph_source.mkdir()
+            graph_received.mkdir()
+            (graph_source / 'graph.json').write_text(json.dumps({'format': 'cosyncx-active-graph-v1',
+                'created_at_ms': 1, 'omitted_missing': 0, 'omitted_archived': 0, 'edges': []}))
             (sender_home / '.stignore').write_text('!/session_index.jsonl\n*\n')
             for name in ('auth.json', 'config.toml', 'state_5.sqlite'):
                 (sender_home / name).write_text('synthetic private data')
@@ -79,6 +84,12 @@ class DirectSyncthingIntegrationTests(unittest.TestCase):
                                    'type': 'sendonly' if index == 0 else 'receiveonly',
                                    'devices': [{'deviceID': ids[index]}, {'deviceID': ids[1-index]}]})
                     clients[index]._post('config/folders', folder)
+                for index, folder_path in enumerate((graph_source, graph_received)):
+                    folder = clients[index]._get('config/defaults/folder')
+                    folder.update({'id': 'mock-graph', 'path': str(folder_path),
+                                   'type': 'sendonly' if index == 0 else 'receiveonly',
+                                   'devices': [{'deviceID': ids[index]}, {'deviceID': ids[1-index]}]})
+                    clients[index]._post('config/folders', folder)
                 shared, nexus, profile = root / 'shared', root / 'Nexus', root / 'profile'
                 shared.mkdir()
                 nexus.mkdir()
@@ -87,13 +98,16 @@ class DirectSyncthingIntegrationTests(unittest.TestCase):
                 receiver = MockDirectReceiver(source=received.parent, profile=profile, shared=shared, key=key,
                     source_root='/source/Nexus', target_root=nexus, codex=shutil.which('codex'),
                     folder_id='mock-chats', peer_id=ids[0], quiet_seconds=0,
-                    titles=titles_received, titles_folder_id='mock-titles')
+                    titles=titles_received, titles_folder_id='mock-titles',
+                    graph=graph_received, graph_folder_id='mock-graph')
                 watch = SyncthingSource(clients[1], 'mock-chats', ids[0], received)
                 watch_titles = SyncthingSource(clients[1], 'mock-titles', ids[0], titles_received)
+                watch_graph = SyncthingSource(clients[1], 'mock-graph', ids[0], graph_received)
                 status_dir = root / 'status'
                 status_dir.mkdir(mode=0o700)
                 status_file = status_dir / 'status.json'
-                supervisor = MockSupervisor(receiver, watch.read, status_file, title_reader=watch_titles.read)
+                supervisor = MockSupervisor(receiver, watch.read, status_file, title_reader=watch_titles.read,
+                                            graph_reader=watch_graph.read)
                 worker = threading.Thread(target=supervisor.run, args=(stop, 0.2), daemon=True)
                 worker.start()
                 def add(number):

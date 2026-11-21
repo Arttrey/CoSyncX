@@ -1,5 +1,6 @@
 """Experimental direct-folder receive cycle for disposable mock profiles only."""
 from pathlib import Path
+import json
 import tempfile
 
 import cosync_auto_gate
@@ -19,25 +20,33 @@ class MockDirectReceiver:
 
     def __init__(self, *, source, profile, shared, key, source_root, target_root,
                  codex, folder_id, peer_id, quiet_seconds=5, backup_root=None,
-                 titles=None, titles_folder_id=None):
+                 titles=None, titles_folder_id=None, graph=None, graph_folder_id=None):
         self.source = mock._mock_path(Path(source))
         self.profile = mock._validate_profile(Path(profile), key)
         self.shared = mock._mock_path(Path(shared))
         self.target = mock._mock_path(Path(target_root))
         self.backup_root = mock._mock_path(Path(backup_root)) if backup_root is not None else None
         self.titles = mock._mock_path(Path(titles)) if titles is not None else None
+        self.graph = mock._mock_path(Path(graph)) if graph is not None else None
         if (self.titles is None) != (titles_folder_id is None):
             raise ns.SyncError('Mock title folder and ID must be configured together')
+        if (self.graph is None) != (graph_folder_id is None) or (self.graph is not None and self.titles is None):
+            raise ns.SyncError('Mock graph needs its own folder and title folder')
         if self.titles is not None and (not self.titles.is_dir() or self.titles == self.source
                 or self.titles in self.source.parents or self.source in self.titles.parents):
             raise ns.SyncError('Mock title folder must be separate')
         if (not (self.source / 'sessions').is_dir()
                 or (self.source / 'archived_sessions').exists()):
             raise ns.SyncError('Expected an active-only temporary source')
+        if self.graph is not None and (not self.graph.is_dir() or any(
+                self.graph == other or self.graph in other.parents or other in self.graph.parents
+                for other in (self.source, self.titles))):
+            raise ns.SyncError('Mock graph folder must be separate')
         self.key, self.source_root, self.codex = key, source_root, Path(codex)
         self.gate = (cosync_auto_gate.RestoreGate(folder_id=folder_id, peer_id=peer_id, quiet_seconds=quiet_seconds)
                      if self.titles is None else cosync_auto_gate.MultiFolderGate(
-                         folder_ids=(folder_id, titles_folder_id), peer_id=peer_id, quiet_seconds=quiet_seconds))
+                         folder_ids=((folder_id, titles_folder_id, graph_folder_id) if self.graph is not None
+                                     else (folder_id, titles_folder_id)), peer_id=peer_id, quiet_seconds=quiet_seconds))
         self.pending_threads = set()
 
     def _chat_digests(self):
@@ -50,6 +59,25 @@ class MockDirectReceiver:
         return {row['id']: row['thread_name'] for row in ns._parse_title_index(data)} if data is not None else {}
 
     def _receive(self):
+        if self.graph is not None:
+            path = self.graph / 'graph.json'
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 32 * 1024 * 1024:
+                return False
+            before = path.stat()
+            raw = path.read_bytes()
+            after = path.stat()
+            if ((before.st_size, before.st_mtime_ns, before.st_ctime_ns, before.st_ino)
+                    != (after.st_size, after.st_mtime_ns, after.st_ctime_ns, after.st_ino)
+                    or len(raw) != before.st_size):
+                return False
+            value = json.loads(raw)
+            # Non-empty graphs require a single shared backup and verified
+            # child indexing. Until that transaction exists, never emit success.
+            if (not isinstance(value, dict) or value.get('format') != 'cosyncx-active-graph-v1'
+                    or type(value.get('omitted_missing')) is not int or value['omitted_missing'] != 0
+                    or type(value.get('omitted_archived')) is not int or value['omitted_archived'] < 0
+                    or value.get('edges') != []):
+                return False
         if self.backup_root is not None and any((self.backup_root / name).exists()
                 or (self.backup_root / name).is_symlink()
                 for name in ('mock-title-pending.json', 'mock-update-pending.json')):
@@ -128,7 +156,7 @@ class MockDirectReceiver:
                     pages_import.index_thread(self.profile, self.shared, self.key, thread, self.codex)
             return True
 
-    def poll(self, status_reader, *, title_status_reader=None, on_restore=None, now=None):
+    def poll(self, status_reader, *, title_status_reader=None, graph_status_reader=None, on_restore=None, now=None):
         first = status_reader()
         if self.titles is None:
             folder, status, connected, remote_state = first
@@ -138,6 +166,11 @@ class MockDirectReceiver:
                 return {'state': 'WAITING', 'mock_only': True}
             second = title_status_reader()
             observations = {first[0]: first, second[0]: second}
+            if self.graph is not None:
+                if graph_status_reader is None:
+                    return {'state': 'WAITING', 'mock_only': True}
+                third = graph_status_reader()
+                observations[third[0]] = third
             revision = self.gate.observe(observations, now=now)
         if revision is None:
             return {'state': 'CURRENT' if self.gate.is_current(now=now) else 'WAITING', 'mock_only': True}
@@ -164,7 +197,11 @@ class MockDirectReceiver:
                                            connected=connected, remote_state=remote_state)
             else:
                 second = title_status_reader()
-                event = self.gate.complete(revision, result, after={first[0]: first, second[0]: second})
+                observations = {first[0]: first, second[0]: second}
+                if self.graph is not None:
+                    third = graph_status_reader()
+                    observations[third[0]] = third
+                event = self.gate.complete(revision, result, after=observations)
             if event is not None:
                 event['mock_only'] = True
             self.pending_threads.clear()

@@ -13,8 +13,9 @@ import nexus_sync as ns
 
 
 class MockSupervisor:
-    def __init__(self, receiver, chat_reader, status_file: Path, *, title_reader=None):
+    def __init__(self, receiver, chat_reader, status_file: Path, *, title_reader=None, graph_reader=None):
         self.receiver, self.chat_reader, self.title_reader = receiver, chat_reader, title_reader
+        self.graph_reader = graph_reader
         self.status_file = mock._mock_path(status_file)
         previous = cosync_restore_status.read_status(self.status_file, mock_only=True, max_age_ms=None)
         self.last_event = previous.get('restore_event') if previous else None
@@ -25,6 +26,7 @@ class MockSupervisor:
     def tick(self):
         try:
             result = self.receiver.poll(self.chat_reader, title_status_reader=self.title_reader,
+                                        graph_status_reader=self.graph_reader,
                                         on_restore=lambda: self._publish('RESTORING'))
             state = result.get('state')
             if state == 'COMPLETE':
@@ -62,6 +64,8 @@ def main(argv=None):
     parser.add_argument('--peer-id', required=True)
     parser.add_argument('--titles', type=Path)
     parser.add_argument('--titles-folder-id')
+    parser.add_argument('--graph', type=Path)
+    parser.add_argument('--graph-folder-id')
     parser.add_argument('--backup-root', type=Path)
     parser.add_argument('--interval', type=float, default=5)
     args = parser.parse_args(argv)
@@ -74,11 +78,15 @@ def main(argv=None):
         receiver = MockDirectReceiver(source=args.source, profile=args.profile, shared=args.shared, key=key,
             source_root=args.source_root, target_root=args.target_root, codex=args.codex,
             folder_id=args.folder_id, peer_id=args.peer_id, backup_root=args.backup_root,
-            titles=args.titles, titles_folder_id=args.titles_folder_id)
+            titles=args.titles, titles_folder_id=args.titles_folder_id,
+            graph=args.graph, graph_folder_id=args.graph_folder_id)
         chat = cosync_syncthing_watch.SyncthingSource(client, args.folder_id, args.peer_id, args.source / 'sessions')
         titles = (cosync_syncthing_watch.SyncthingSource(client, args.titles_folder_id, args.peer_id, args.titles)
                   if args.titles is not None else None)
-        supervisor = MockSupervisor(receiver, chat.read, args.status_file, title_reader=titles.read if titles else None)
+        graph = (cosync_syncthing_watch.SyncthingSource(client, args.graph_folder_id, args.peer_id, args.graph)
+                 if args.graph is not None else None)
+        supervisor = MockSupervisor(receiver, chat.read, args.status_file, title_reader=titles.read if titles else None,
+                                    graph_reader=graph.read if graph else None)
         supervisor.run(threading.Event(), args.interval)
         return 0
     except KeyboardInterrupt:

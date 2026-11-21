@@ -14,6 +14,47 @@ from mock_direct_receiver import MockDirectReceiver
 @unittest.skipUnless(os.environ.get('NEXUS_TEST_CODEX') == '1' and shutil.which('codex'),
                      'requires disposable Codex experiment')
 class DirectReceiverTests(unittest.TestCase):
+    def test_graph_must_be_received_and_unsupported_edges_never_emit_success(self):
+        with tempfile.TemporaryDirectory(prefix='cosyncx-graph-gate-') as tmp:
+            root = Path(tmp).resolve()
+            source, shared, target, profile, titles, graph = (root / x for x in
+                ('source', 'shared', 'Nexus', 'profile', 'titles', 'graph'))
+            (source / 'sessions').mkdir(parents=True)
+            for path in (shared, target, titles, graph): path.mkdir()
+            key = b'g' * 32
+            mock.init_mock_profile(profile, key, shared)
+            (titles / 'session_index.jsonl').write_text('')
+            graph_file = graph / 'graph.json'
+            graph_data = {'format': 'cosyncx-active-graph-v1', 'omitted_missing': 0,
+                          'omitted_archived': 0, 'edges': [{'parent': 'synthetic'}]}
+            graph_file.write_text(json.dumps(graph_data))
+            receiver = MockDirectReceiver(source=source, profile=profile, shared=shared, key=key,
+                source_root='/source/Nexus', target_root=target, codex=shutil.which('codex'),
+                folder_id='chats', peer_id='vps', quiet_seconds=0, titles=titles,
+                titles_folder_id='titles', graph=graph, graph_folder_id='graph')
+            base = {'state': 'idle', 'sequence': 1, 'remoteSequence': {'vps': 1}, 'needFiles': 0,
+                    'needDirectories': 0, 'needSymlinks': 0, 'needDeletes': 0, 'errors': 0, 'pullErrors': 0}
+            def read(name, status): return lambda: (name, status, True, 'valid')
+            chats, title = read('chats', base), read('titles', base)
+            graph_status = dict(base, needFiles=1)
+            read_graph = read('graph', graph_status)
+            self.assertEqual(receiver.poll(chats, title_status_reader=title, graph_status_reader=read_graph,
+                                           now=0)['state'], 'WAITING')
+            graph_status['needFiles'] = 0
+            self.assertEqual(receiver.poll(chats, title_status_reader=title, graph_status_reader=read_graph,
+                                           now=1)['state'], 'WAITING')
+            result = receiver.poll(chats, title_status_reader=title, graph_status_reader=read_graph, now=2)
+            self.assertEqual(result['state'], 'PENDING')
+            self.assertNotIn('restore_event', result)
+            graph_data['edges'] = []
+            graph_file.write_text(json.dumps(graph_data))
+            graph_status['sequence'] = 2
+            graph_status['remoteSequence'] = {'vps': 2}
+            receiver.poll(chats, title_status_reader=title, graph_status_reader=read_graph, now=3)
+            result = receiver.poll(chats, title_status_reader=title, graph_status_reader=read_graph, now=4)
+            self.assertEqual(result['state'], 'COMPLETE')
+            self.assertIsNone(result['restore_event'])
+
     def test_linked_subagent_prevents_incomplete_success(self):
         with tempfile.TemporaryDirectory(prefix='cosyncx-child-') as tmp:
             root = Path(tmp).resolve()
